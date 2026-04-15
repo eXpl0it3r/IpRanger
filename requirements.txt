@@ -1,0 +1,5 @@
+flask>=3.0
+flask-apscheduler>=1.13
+requests>=2.31
+pyyaml>=6.0
+ipwhois>=1.3

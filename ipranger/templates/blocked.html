@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Blocked – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Blocked Entries</h1>
+      <p class="text-sm text-gray-500 mt-0.5">IPs and CIDRs blocked via IpRanger</p>
+    </div>
+    <span class="text-sm text-gray-500">{{ total }} entries</span>
+  </div>
+
+  <!-- Add manual block form -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+    <h2 class="text-sm font-semibold text-gray-700 mb-3">Block an IP or CIDR</h2>
+    <form class="flex flex-col sm:flex-row gap-3"
+          hx-post="/api/block"
+          hx-target="#blocked-container"
+          hx-swap="innerHTML">
+      <input type="text" name="ip" placeholder="192.168.1.1 or 10.0.0.0/8"
+        class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+        required />
+      <input type="text" name="reason" placeholder="Reason (optional)"
+        class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" />
+      <button type="submit"
+        class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors">
+        Block
+      </button>
+    </form>
+  </div>
+
+  <!-- Blocked table -->
+  <div id="blocked-container">
+    {% include "partials/blocked_table.html" %}
+  </div>
+
+</div>
+{% endblock %}

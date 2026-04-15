@@ -1,0 +1,39 @@
+<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Total IPs</p>
+    <p class="mt-1 text-3xl font-bold text-gray-900">{{ stats.total_ips }}</p>
+    <p class="text-xs text-gray-400 mt-1">Observed IPs</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Connections</p>
+    <p class="mt-1 text-3xl font-bold text-indigo-600">{{ stats.total_connections }}</p>
+    <p class="text-xs text-gray-400 mt-1">Cumulative</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-red-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-red-400 uppercase tracking-wide">Blocked</p>
+    <p class="mt-1 text-3xl font-bold text-red-600">{{ stats.blocked_count }}</p>
+    <p class="text-xs text-gray-400 mt-1">Active blocks</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-yellow-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-yellow-500 uppercase tracking-wide">Flagged</p>
+    <p class="mt-1 text-3xl font-bold text-yellow-600">{{ stats.flagged_count }}</p>
+    <p class="text-xs text-gray-400 mt-1">High-connection IPs</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-indigo-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-indigo-400 uppercase tracking-wide">Block List</p>
+    <p class="mt-1 text-3xl font-bold text-indigo-700">{{ stats.blocklist_entries_count }}</p>
+    <p class="text-xs text-gray-400 mt-1">Feed entries</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-green-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-green-500 uppercase tracking-wide">Friendly</p>
+    <p class="mt-1 text-3xl font-bold text-green-600">{{ stats.friendly_count }}</p>
+    <p class="text-xs text-gray-400 mt-1">Safe entries</p>
+  </div>
+
+</div>

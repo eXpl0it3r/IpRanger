@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Statistics – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">IP Statistics</h1>
+      <p class="text-sm text-gray-500 mt-0.5">All observed connecting IPs</p>
+    </div>
+    <span class="text-sm text-gray-500">{{ total }} total IPs</span>
+  </div>
+
+  <!-- Search bar -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <div class="flex flex-col sm:flex-row gap-3">
+      <div class="flex-1 relative">
+        <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none"
+             viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input
+          id="search-input"
+          type="text"
+          name="search"
+          value="{{ search }}"
+          placeholder="Search IP, org, country, ASN..."
+          class="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          hx-get="/partials/stats"
+          hx-trigger="keyup changed delay:300ms, search"
+          hx-target="#stats-container"
+          hx-swap="innerHTML"
+          hx-include="[name='sort']"
+        />
+      </div>
+      <select name="sort" id="sort-select"
+        class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+        hx-get="/partials/stats"
+        hx-trigger="change"
+        hx-target="#stats-container"
+        hx-swap="innerHTML"
+        hx-include="#search-input">
+        <option value="connection_count" {% if sort == 'connection_count' %}selected{% endif %}>Sort: Connections ↓</option>
+        <option value="ip"               {% if sort == 'ip' %}selected{% endif %}>Sort: IP</option>
+        <option value="last_seen"        {% if sort == 'last_seen' %}selected{% endif %}>Sort: Last Seen ↓</option>
+        <option value="rdap_country"     {% if sort == 'rdap_country' %}selected{% endif %}>Sort: Country</option>
+        <option value="rdap_org"         {% if sort == 'rdap_org' %}selected{% endif %}>Sort: Org</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Table container -->
+  <div id="stats-container">
+    {% include "partials/stats_table.html" %}
+  </div>
+
+</div>
+{% endblock %}

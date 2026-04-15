@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Settings – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Settings</h1>
+    <p class="text-sm text-gray-500 mt-0.5">Manage block lists, friendly IPs, and ipset integration</p>
+  </div>
+
+  <!-- Block List Sources -->
+  <section class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+      <div>
+        <h2 class="text-base font-semibold text-gray-800">Block List Sources</h2>
+        <p class="text-xs text-gray-500 mt-0.5">External threat intelligence feeds</p>
+      </div>
+      <form hx-post="/api/blocklists/refresh"
+            hx-target="#sources-table-wrap"
+            hx-swap="innerHTML">
+        <button type="submit"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round"
+              d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+          </svg>
+          Refresh All
+        </button>
+      </form>
+    </div>
+    <div id="sources-table-wrap" class="overflow-x-auto">
+      {% include "partials/sources_table.html" %}
+    </div>
+  </section>
+
+  <!-- Friendly IPs -->
+  <section class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-semibold text-gray-800">Friendly IPs &amp; Ranges</h2>
+      <p class="text-xs text-gray-500 mt-0.5">These IPs will never be auto-blocked and are marked safe</p>
+    </div>
+    <div class="px-6 py-4">
+      <form class="flex flex-col sm:flex-row gap-3 mb-5"
+            hx-post="/api/friendly/add"
+            hx-target="#friendly-table-wrap"
+            hx-swap="innerHTML">
+        <input type="text" name="ip" placeholder="IP or CIDR (e.g. 10.0.0.1 or 192.168.0.0/24)"
+          class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+          required />
+        <input type="text" name="label" placeholder="Label (optional)"
+          class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500" />
+        <button type="submit"
+          class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors">
+          Add Friendly
+        </button>
+      </form>
+
+      <div id="friendly-table-wrap">
+        {% include "partials/friendly_table.html" %}
+      </div>
+    </div>
+  </section>
+
+  <!-- ipset Integration -->
+  <section class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-semibold text-gray-800">ipset / iptables Integration</h2>
+      <p class="text-xs text-gray-500 mt-0.5">Kernel-level packet filtering (requires root)</p>
+    </div>
+    <div class="px-6 py-4" id="ipset-status-wrap">
+      {% include "partials/ipset_status.html" %}
+    </div>
+  </section>
+
+  <!-- Config display -->
+  <section class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-gray-100">
+      <h2 class="text-base font-semibold text-gray-800">Configured Sources (config.yaml)</h2>
+      <p class="text-xs text-gray-500 mt-0.5">Read-only view of config.yaml blocklist entries</p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            <th class="px-6 py-3">Name</th>
+            <th class="px-6 py-3">URL</th>
+            <th class="px-6 py-3">Type</th>
+            <th class="px-6 py-3">Enabled</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for s in cfg_sources %}
+          <tr class="hover:bg-gray-50">
+            <td class="px-6 py-3 font-medium text-gray-800">{{ s.name }}</td>
+            <td class="px-6 py-3 text-gray-500 text-xs max-w-xs truncate">
+              <a href="{{ s.url }}" target="_blank" class="text-indigo-600 hover:underline">{{ s.url }}</a>
+            </td>
+            <td class="px-6 py-3">
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-700">{{ s.type }}</span>
+            </td>
+            <td class="px-6 py-3">
+              {% if s.enabled %}
+                <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Yes</span>
+              {% else %}
+                <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">No</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+{% endblock %}

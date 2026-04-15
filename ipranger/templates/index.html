@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <!-- Page header -->
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Dashboard</h1>
+      <p class="text-sm text-gray-500 mt-0.5">Live TCP connection monitoring</p>
+    </div>
+    <form hx-post="/api/blocklists/refresh" hx-target="#sources-feedback" hx-swap="innerHTML">
+      <button type="submit"
+        class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+        </svg>
+        Refresh Block Lists
+      </button>
+    </form>
+  </div>
+  <span id="sources-feedback" class="text-sm text-gray-500"></span>
+
+  <!-- Overview cards (auto-refresh) -->
+  <div id="overview-cards"
+       hx-get="/partials/overview"
+       hx-trigger="every 10s"
+       hx-swap="innerHTML">
+    {% include "partials/overview_cards.html" %}
+  </div>
+
+  <!-- Recent connections -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+      <h2 class="text-base font-semibold text-gray-800">Top Connections</h2>
+      <a href="{{ url_for('stats') }}"
+         class="text-sm text-indigo-600 hover:text-indigo-800 font-medium">View all →</a>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="bg-gray-50 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            <th class="px-6 py-3">IP Address</th>
+            <th class="px-6 py-3">Connections</th>
+            <th class="px-6 py-3">Org / Network</th>
+            <th class="px-6 py-3">Country</th>
+            <th class="px-6 py-3">Status</th>
+            <th class="px-6 py-3">Last Seen</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for row in top_ips %}
+          <tr class="hover:bg-gray-50 transition-colors">
+            <td class="px-6 py-3 font-mono text-gray-800 font-medium">{{ row.ip }}</td>
+            <td class="px-6 py-3 text-gray-700">
+              <span class="font-semibold">{{ row.connection_count }}</span>
+            </td>
+            <td class="px-6 py-3 text-gray-600 max-w-[200px] truncate">
+              {{ row.rdap_org or '-' }}
+            </td>
+            <td class="px-6 py-3 text-gray-600">{{ row.rdap_country or '-' }}</td>
+            <td class="px-6 py-3">
+              {% if row.is_blocked %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-700">Blocked</span>
+              {% elif row.is_flagged %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-700">Flagged</span>
+              {% elif row.is_friendly %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">Friendly</span>
+              {% else %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-gray-100 text-gray-500">-</span>
+              {% endif %}
+            </td>
+            <td class="px-6 py-3 text-gray-500 text-xs">{{ row.last_seen or '-' }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-gray-400 text-sm">
+              No connections recorded yet. The monitor runs every 10 seconds.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

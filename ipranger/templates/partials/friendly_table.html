@@ -1,0 +1,43 @@
+<table class="w-full text-sm">
+  <thead>
+    <tr class="bg-gray-50 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+      <th class="px-4 py-3">Entry</th>
+      <th class="px-4 py-3">Type</th>
+      <th class="px-4 py-3">Label</th>
+      <th class="px-4 py-3">Added</th>
+      <th class="px-4 py-3">Actions</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-gray-100">
+    {% for f in friendly %}
+    <tr class="hover:bg-gray-50 transition-colors">
+      <td class="px-4 py-3 font-mono font-medium text-gray-800">{{ f.entry }}</td>
+      <td class="px-4 py-3">
+        <span class="px-2 py-0.5 rounded text-xs font-medium
+          {% if f.entry_type == 'cidr' %}bg-purple-50 text-purple-700{% else %}bg-green-50 text-green-700{% endif %}">
+          {{ f.entry_type }}
+        </span>
+      </td>
+      <td class="px-4 py-3 text-gray-500 text-xs">{{ f.label or '-' }}</td>
+      <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">{{ (f.created_at or '')[:19] }}</td>
+      <td class="px-4 py-3">
+        <form hx-post="/api/friendly/remove"
+              hx-target="#friendly-table-wrap"
+              hx-swap="innerHTML">
+          <input type="hidden" name="entry" value="{{ f.entry }}" />
+          <button type="submit"
+            class="px-3 py-1 text-xs font-medium bg-red-50 hover:bg-red-100 text-red-700 rounded transition-colors">
+            Remove
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="5" class="px-4 py-6 text-center text-gray-400 text-sm">
+        No friendly entries yet.
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

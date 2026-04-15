@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Bad IPs – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Block List Entries</h1>
+      <p class="text-sm text-gray-500 mt-0.5">IPs and CIDRs from external threat feeds</p>
+    </div>
+    <span class="text-sm text-gray-500">{{ total }} entries</span>
+  </div>
+
+  <!-- Source summary cards -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+    {% for src in sources %}
+    <a href="{{ url_for('bad_ips', source=src.name) }}"
+       class="bg-white rounded-xl border p-3 shadow-sm hover:border-indigo-300 transition-colors
+              {% if source_filter == src.name %}border-indigo-400 ring-1 ring-indigo-300{% else %}border-gray-200{% endif %}">
+      <p class="text-xs font-semibold text-gray-700 truncate">{{ src.name }}</p>
+      <p class="text-lg font-bold text-indigo-700 mt-1">{{ src.entry_count or 0 }}</p>
+      <p class="text-xs text-gray-400">entries</p>
+      {% if not src.enabled %}
+        <span class="mt-1 inline-block px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-500">disabled</span>
+      {% endif %}
+    </a>
+    {% else %}
+    <div class="col-span-5 text-center text-gray-400 text-sm py-4">
+      No block list sources configured. Add them in Settings.
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Filter bar -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <form method="get" class="flex flex-col sm:flex-row gap-3 items-end">
+      <div class="flex-1">
+        <label class="block text-xs font-medium text-gray-600 mb-1">Filter by Source</label>
+        <select name="source"
+          class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500">
+          <option value="">All sources</option>
+          {% for src in sources %}
+          <option value="{{ src.name }}" {% if source_filter == src.name %}selected{% endif %}>
+            {{ src.name }} ({{ src.entry_count or 0 }})
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit"
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+        Filter
+      </button>
+      {% if source_filter %}
+      <a href="{{ url_for('bad_ips') }}"
+         class="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-lg transition-colors">
+        Clear
+      </a>
+      {% endif %}
+    </form>
+  </div>
+
+  <!-- Entries table -->
+  <div id="bad-ips-container">
+    {% include "partials/bad_ips_table.html" %}
+  </div>
+
+</div>
+{% endblock %}
