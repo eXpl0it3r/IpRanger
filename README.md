@@ -10,7 +10,7 @@ TCP traffic monitoring and blocking tool for Debian/Ubuntu servers. Monitor inco
 - **ipset / iptables** - create/flush/sync sets and install DROP rules without hand-editing
 - **Friendly IPs** - whitelist IPs or CIDR ranges that should never be flagged
 - **Country blocking** - optional per-country blocking based on RDAP country codes
-- **Web UI** - dashboard, statistics, blocked IPs, bad-IP explorer, and settings via Flask + HTMX + Tailwind CSS
+- **Web UI** - dashboard, statistics, **network explorer**, blocked IPs, bad-IP explorer, and settings via Flask + HTMX + Tailwind CSS
 
 ## Requirements
 
@@ -65,6 +65,17 @@ Five sources are pre-configured. Enable or disable them in `config.yaml` under `
 | `emerging_threats` | IP | ✅ |
 | `firehol_level2` | CIDR | ❌ |
 | `tor_exit_nodes` | IP | ❌ |
+
+## Web UI pages
+
+| Page | Description |
+|------|-------------|
+| **Dashboard** | Live overview cards (auto-refresh every 10 s) and top-10 connections |
+| **Statistics** | Searchable, sortable per-IP table with RDAP data and block/friendly actions |
+| **Networks** | RDAP-resolved networks/prefixes grouped by CIDR, with expandable IP drilldown |
+| **Blocked** | Manually and automatically blocked entries; add/remove from here |
+| **Bad IPs** | Browser for block list entries, filterable by source |
+| **Settings** | Block list management, friendly IPs, ipset status and sync |
 
 ## Project layout
 

@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Networks – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+
+  <div class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Discovered Networks</h1>
+      <p class="text-sm text-gray-500 mt-0.5">IP ranges resolved via RDAP, grouped by network/prefix</p>
+    </div>
+    <span class="text-sm text-gray-500">{{ total }} network{{ 's' if total != 1 else '' }}</span>
+  </div>
+
+  <!-- Search -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <div class="relative">
+      <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none"
+           viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round"
+          d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+      </svg>
+      <input
+        type="text"
+        name="search"
+        value="{{ search }}"
+        placeholder="Search network, org, ASN, country..."
+        class="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+        hx-get="/networks"
+        hx-push-url="true"
+        hx-trigger="keyup changed delay:300ms, search"
+        hx-target="body"
+        hx-select="main"
+        hx-swap="innerHTML"
+      />
+    </div>
+  </div>
+
+  <!-- Network table -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    {% if rows %}
+    <table class="min-w-full divide-y divide-gray-200 text-sm">
+      <thead class="bg-gray-50">
+        <tr>
+          <th class="w-8 px-4 py-3"></th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Network / CIDR</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Organisation</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">ASN</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Country</th>
+          <th class="px-4 py-3 text-right font-semibold text-gray-600">IPs seen</th>
+          <th class="px-4 py-3 text-right font-semibold text-gray-600">Connections</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Last seen</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100" id="networks-tbody">
+        {% for row in rows %}
+        {# unique slug for this row's expand target #}
+        {% set slug = loop.index %}
+        <tr class="hover:bg-gray-50 cursor-pointer"
+            onclick="toggleNetwork({{ slug }})">
+          <td class="px-4 py-3 text-gray-400">
+            <svg id="chevron-{{ slug }}" class="w-4 h-4 transition-transform duration-200"
+                 fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
+          </td>
+          <td class="px-4 py-3 font-mono text-indigo-700 font-medium">{{ row.network }}</td>
+          <td class="px-4 py-3 text-gray-700 max-w-xs truncate" title="{{ row.org }}">{{ row.org or '–' }}</td>
+          <td class="px-4 py-3 text-gray-600 font-mono text-xs">{{ row.asn or '–' }}</td>
+          <td class="px-4 py-3">
+            {% if row.country %}
+              <span class="inline-flex items-center gap-1 text-gray-700">
+                <span class="font-medium">{{ row.country }}</span>
+              </span>
+            {% else %}–{% endif %}
+          </td>
+          <td class="px-4 py-3 text-right font-semibold text-gray-800">{{ row.ip_count }}</td>
+          <td class="px-4 py-3 text-right text-gray-600">{{ '{:,}'.format(row.total_connections) }}</td>
+          <td class="px-4 py-3">
+            <div class="flex flex-wrap gap-1">
+              {% if row.blocked_count %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-700">{{ row.blocked_count }} blocked</span>
+              {% endif %}
+              {% if row.flagged_count %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-700">{{ row.flagged_count }} flagged</span>
+              {% endif %}
+              {% if row.friendly_count %}
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">{{ row.friendly_count }} friendly</span>
+              {% endif %}
+              {% if not row.blocked_count and not row.flagged_count and not row.friendly_count %}
+                <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-400">–</span>
+              {% endif %}
+            </div>
+          </td>
+          <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
+            {{ row.last_seen[:16].replace('T', ' ') if row.last_seen else '–' }}
+          </td>
+        </tr>
+        <!-- Expandable IP sub-table row -->
+        <tr id="expand-{{ slug }}" class="hidden">
+          <td colspan="9" class="p-0 bg-indigo-50/40">
+            <div
+              id="network-ips-{{ slug }}"
+              hx-get="/partials/network-ips?network={{ row.network | urlencode }}"
+              hx-trigger="revealed"
+              hx-swap="innerHTML"
+              class="px-8 py-3"
+            >
+              <span class="text-sm text-gray-400 italic">Loading IPs…</span>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div class="border-t border-gray-100 px-4 py-3 flex items-center justify-between text-sm text-gray-600">
+      <span>Page {{ page }} of {{ total_pages }} &mdash; {{ total }} networks total</span>
+      <div class="flex gap-1">
+        {% if page > 1 %}
+          <a href="{{ url_for('networks', page=page-1, search=search) }}"
+             class="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50">&laquo;</a>
+        {% endif %}
+        {% for p in page_range(page, total_pages) %}
+          <a href="{{ url_for('networks', page=p, search=search) }}"
+             class="px-3 py-1 rounded border {% if p == page %}bg-indigo-600 text-white border-indigo-600{% else %}border-gray-300 hover:bg-gray-50{% endif %}">
+            {{ p }}
+          </a>
+        {% endfor %}
+        {% if page < total_pages %}
+          <a href="{{ url_for('networks', page=page+1, search=search) }}"
+             class="px-3 py-1 rounded border border-gray-300 hover:bg-gray-50">&raquo;</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% else %}
+    <div class="px-6 py-12 text-center text-gray-400">
+      <svg class="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" viewBox="0 0 24 24"
+           stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round"
+          d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3" />
+      </svg>
+      {% if search %}
+        <p class="font-medium text-gray-500">No networks match <em>{{ search }}</em></p>
+      {% else %}
+        <p class="font-medium text-gray-500">No networks discovered yet</p>
+        <p class="mt-1 text-sm">Networks appear here once RDAP enrichment has run on observed IPs.</p>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+
+<script>
+function toggleNetwork(slug) {
+  const row = document.getElementById('expand-' + slug);
+  const chevron = document.getElementById('chevron-' + slug);
+  if (row.classList.contains('hidden')) {
+    row.classList.remove('hidden');
+    chevron.style.transform = 'rotate(90deg)';
+    // Trigger HTMX load if not already loaded
+    const container = document.getElementById('network-ips-' + slug);
+    if (container && !container.dataset.loaded) {
+      htmx.trigger(container, 'revealed');
+      container.dataset.loaded = '1';
+    }
+  } else {
+    row.classList.add('hidden');
+    chevron.style.transform = '';
+  }
+}
+</script>
+{% endblock %}

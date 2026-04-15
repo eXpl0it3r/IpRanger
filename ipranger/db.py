@@ -502,3 +502,74 @@ def get_top_ips(limit=10):
     finally:
         if owned:
             conn.close()
+
+
+def get_network_stats(page=1, per_page=50, search=None):
+    """Return paginated discovered networks grouped by rdap_network.
+
+    Each row contains aggregate data for all IPs belonging to that network.
+    IPs whose RDAP has not been resolved yet are excluded.
+    """
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+
+        where_parts = ["rdap_looked_up = 1", "rdap_network IS NOT NULL", "rdap_network != ''"]
+        params: list = []
+        if search:
+            like = f"%{search}%"
+            where_parts.append(
+                "(rdap_network LIKE ? OR rdap_org LIKE ? OR rdap_asn LIKE ? OR rdap_country LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+
+        where = "WHERE " + " AND ".join(where_parts)
+
+        cur.execute(
+            f"SELECT COUNT(DISTINCT rdap_network) FROM ip_stats {where}", params
+        )
+        total = cur.fetchone()[0]
+
+        offset = (page - 1) * per_page
+        cur.execute(f"""
+            SELECT
+                rdap_network                        AS network,
+                rdap_org                            AS org,
+                rdap_asn                            AS asn,
+                rdap_country                        AS country,
+                COUNT(ip)                           AS ip_count,
+                SUM(connection_count)               AS total_connections,
+                SUM(is_blocked)                     AS blocked_count,
+                SUM(CASE WHEN is_flagged=1 AND is_blocked=0 THEN 1 ELSE 0 END) AS flagged_count,
+                SUM(is_friendly)                    AS friendly_count,
+                MAX(last_seen)                      AS last_seen
+            FROM ip_stats
+            {where}
+            GROUP BY rdap_network
+            ORDER BY total_connections DESC
+            LIMIT ? OFFSET ?
+        """, params + [per_page, offset])
+        rows = [dict(r) for r in cur.fetchall()]
+        return rows, total
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_ips_for_network(network):
+    """Return all IPs that belong to the given rdap_network."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ip, connection_count, first_seen, last_seen,
+                   is_blocked, is_flagged, is_friendly,
+                   rdap_org, rdap_asn, rdap_country
+            FROM ip_stats
+            WHERE rdap_network = ?
+            ORDER BY connection_count DESC
+        """, (network,))
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()

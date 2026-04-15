@@ -1,0 +1,67 @@
+{% if ips %}
+<table class="min-w-full text-xs divide-y divide-indigo-100">
+  <thead>
+    <tr class="text-indigo-600 font-semibold">
+      <th class="px-3 py-2 text-left">IP Address</th>
+      <th class="px-3 py-2 text-right">Connections</th>
+      <th class="px-3 py-2 text-left">First seen</th>
+      <th class="px-3 py-2 text-left">Last seen</th>
+      <th class="px-3 py-2 text-left">Status</th>
+      <th class="px-3 py-2 text-left">Actions</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-indigo-50">
+    {% for ip in ips %}
+    <tr class="hover:bg-white/60">
+      <td class="px-3 py-2 font-mono text-gray-800 font-medium">
+        <a href="{{ url_for('stats') }}?search={{ ip.ip }}"
+           class="hover:text-indigo-600 hover:underline"
+           onclick="event.stopPropagation()">{{ ip.ip }}</a>
+      </td>
+      <td class="px-3 py-2 text-right text-gray-600">{{ '{:,}'.format(ip.connection_count) }}</td>
+      <td class="px-3 py-2 text-gray-500 whitespace-nowrap">
+        {{ ip.first_seen[:16].replace('T', ' ') if ip.first_seen else '–' }}
+      </td>
+      <td class="px-3 py-2 text-gray-500 whitespace-nowrap">
+        {{ ip.last_seen[:16].replace('T', ' ') if ip.last_seen else '–' }}
+      </td>
+      <td class="px-3 py-2">
+        {% if ip.is_blocked %}
+          <span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-700">Blocked</span>
+        {% elif ip.is_flagged %}
+          <span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-700">Flagged</span>
+        {% elif ip.is_friendly %}
+          <span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">Friendly</span>
+        {% else %}
+          <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-400">–</span>
+        {% endif %}
+      </td>
+      <td class="px-3 py-2">
+        {% if ip.is_blocked %}
+          <form method="post" action="{{ url_for('api_unblock') }}" class="inline"
+                onclick="event.stopPropagation()">
+            <input type="hidden" name="ip" value="{{ ip.ip }}">
+            <button type="submit"
+                    class="px-2 py-0.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-white">
+              Unblock
+            </button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('api_block') }}" class="inline"
+                onclick="event.stopPropagation()">
+            <input type="hidden" name="ip" value="{{ ip.ip }}">
+            <input type="hidden" name="reason" value="Manual block from Networks page">
+            <button type="submit"
+                    class="px-2 py-0.5 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50">
+              Block
+            </button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-sm text-gray-400 italic py-2">No IPs found for this network.</p>
+{% endif %}

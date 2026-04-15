@@ -9,6 +9,7 @@ from .db import (
     get_blocklist_sources, get_blocklist_entries, get_friendly_entries,
     get_blocked_entries, block_ip, unblock_ip, add_friendly, remove_friendly,
     update_rdap, get_top_ips, upsert_blocklist_source,
+    get_network_stats, get_ips_for_network,
 )
 from .rdap import lookup_ip
 
@@ -54,6 +55,27 @@ def create_app():
             rows=rows, page=page, total=total,
             total_pages=total_pages, search=search, sort=sort,
         )
+
+    @app.route('/networks')
+    def networks():
+        page = int(request.args.get('page', 1))
+        search = request.args.get('search', '').strip()
+        per_page = 50
+        rows, total = get_network_stats(page=page, per_page=per_page, search=search or None)
+        total_pages = max(1, math.ceil(total / per_page))
+        return render_template(
+            'networks.html',
+            rows=rows, page=page, total=total,
+            total_pages=total_pages, search=search,
+        )
+
+    @app.route('/partials/network-ips')
+    def partial_network_ips():
+        network = request.args.get('network', '').strip()
+        if not network:
+            return '', 400
+        ips = get_ips_for_network(network)
+        return render_template('partials/network_ips.html', ips=ips, network=network)
 
     @app.route('/blocked')
     def blocked():
