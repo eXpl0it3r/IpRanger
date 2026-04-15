@@ -11,6 +11,10 @@ _PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
 _IPV6_ADDR_RE = re.compile(r'^\[(.+)\]:(\d+)$')
 _IPV4_ADDR_RE = re.compile(r'^([\d.]+):(\d+)$')
 
+# 4-tuple (local_ip, local_port, peer_ip, peer_port) → conn dict
+# Persists across scheduler ticks so we can detect new vs ongoing connections.
+_active_connections: dict[tuple, dict] = {}
+
 
 def parse_addr(addr):
     """Parse IP:port or [IPv6]:port into (ip, port) tuple.
@@ -89,13 +93,32 @@ def get_connections():
 
 
 def record_connections():
-    """Called by scheduler. Get connections and record to DB."""
+    """Called by scheduler. Detect new connections and record to DB.
+
+    Only connections that are new since the last poll tick increment the
+    connection counter. Connections that were already open simply have their
+    ``last_seen`` timestamp refreshed. This prevents a long-lived TCP session
+    from being counted once per poll interval.
+    """
+    global _active_connections
     from .db import upsert_ip_connection
     from .config import config
 
-    connections = get_connections()
+    current_list = get_connections()
     flag_threshold = config.get('monitoring', 'flag_threshold', default=500)
-    for conn in connections:
+
+    # Build a map of 4-tuple → conn for this tick
+    current: dict[tuple, dict] = {}
+    for conn in current_list:
+        key = (conn['local_ip'], conn['local_port'], conn['peer_ip'], conn['peer_port'])
+        current[key] = conn
+
+    new_keys  = current.keys() - _active_connections.keys()
+    kept_keys = current.keys() & _active_connections.keys()
+
+    # New connections → increment counter
+    for key in new_keys:
+        conn = current[key]
         upsert_ip_connection(
             ip=conn['peer_ip'],
             local_port=conn['local_port'],
@@ -103,6 +126,26 @@ def record_connections():
             state=conn['state'],
             process=conn['process'],
             flag_threshold=flag_threshold,
+            increment=True,
         )
-    logger.debug(f"Recorded {len(connections)} connections")
-    return len(connections)
+
+    # Ongoing connections → touch last_seen only
+    for key in kept_keys:
+        conn = current[key]
+        upsert_ip_connection(
+            ip=conn['peer_ip'],
+            local_port=conn['local_port'],
+            remote_port=conn['peer_port'],
+            state=conn['state'],
+            process=conn['process'],
+            flag_threshold=flag_threshold,
+            increment=False,
+        )
+
+    _active_connections = current
+
+    logger.debug(
+        f"Connections: {len(current)} open, {len(new_keys)} new, "
+        f"{len(_active_connections) - len(kept_keys)} closed"
+    )
+    return len(new_keys)

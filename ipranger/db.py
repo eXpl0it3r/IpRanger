@@ -108,8 +108,14 @@ def init_db():
     logger.info("Database initialized")
 
 
-def upsert_ip_connection(ip, local_port, remote_port, state, process, flag_threshold=500):
-    """Insert or update ip_stats for a seen connection."""
+def upsert_ip_connection(ip, local_port, remote_port, state, process, flag_threshold=500, increment=True):
+    """Insert or update ip_stats for a seen connection.
+
+    When *increment* is True (default) the connection_count is incremented —
+    use this only for connections that are new since the last poll.
+    When False, only last_seen and is_friendly are updated, leaving the count
+    unchanged so long-lived connections aren't double-counted.
+    """
     conn, owned = _db()
     try:
         now = datetime.utcnow().isoformat()
@@ -134,20 +140,31 @@ def upsert_ip_connection(ip, local_port, remote_port, state, process, flag_thres
             except (AddressValueError, ValueError):
                 pass
 
-        cur.execute("""
-            INSERT INTO ip_stats (ip, connection_count, first_seen, last_seen, is_friendly)
-            VALUES (?, 1, ?, ?, ?)
-            ON CONFLICT(ip) DO UPDATE SET
-                connection_count = connection_count + 1,
-                last_seen = excluded.last_seen,
-                is_friendly = CASE WHEN excluded.is_friendly = 1 THEN 1 ELSE is_friendly END
-        """, (ip, now, now, is_friendly))
+        if increment:
+            cur.execute("""
+                INSERT INTO ip_stats (ip, connection_count, first_seen, last_seen, is_friendly)
+                VALUES (?, 1, ?, ?, ?)
+                ON CONFLICT(ip) DO UPDATE SET
+                    connection_count = connection_count + 1,
+                    last_seen = excluded.last_seen,
+                    is_friendly = CASE WHEN excluded.is_friendly = 1 THEN 1 ELSE is_friendly END
+            """, (ip, now, now, is_friendly))
+        else:
+            # Ongoing connection: just refresh last_seen and is_friendly
+            cur.execute("""
+                INSERT INTO ip_stats (ip, connection_count, first_seen, last_seen, is_friendly)
+                VALUES (?, 0, ?, ?, ?)
+                ON CONFLICT(ip) DO UPDATE SET
+                    last_seen = excluded.last_seen,
+                    is_friendly = CASE WHEN excluded.is_friendly = 1 THEN 1 ELSE is_friendly END
+            """, (ip, now, now, is_friendly))
 
-        # Check flag threshold
-        cur.execute("SELECT connection_count FROM ip_stats WHERE ip = ?", (ip,))
-        row = cur.fetchone()
-        if row and row[0] >= flag_threshold and not is_friendly:
-            cur.execute("UPDATE ip_stats SET is_flagged = 1 WHERE ip = ?", (ip,))
+        # Check flag threshold (only relevant when incrementing)
+        if increment:
+            cur.execute("SELECT connection_count FROM ip_stats WHERE ip = ?", (ip,))
+            row = cur.fetchone()
+            if row and row[0] >= flag_threshold and not is_friendly:
+                cur.execute("UPDATE ip_stats SET is_flagged = 1 WHERE ip = ?", (ip,))
 
         conn.commit()
     except Exception as e:
