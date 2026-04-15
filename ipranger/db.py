@@ -308,17 +308,31 @@ def get_blocklist_sources():
 
 
 def upsert_blocklist_source(name, url, entry_type, enabled=1):
-    """Add or update a blocklist source record."""
+    """Add or update a blocklist source record.
+
+    When *enabled* is None the existing enabled value in the DB is preserved
+    (used during restart seeding so UI toggles are not overwritten).
+    """
     conn, owned = _db()
     try:
-        conn.execute("""
-            INSERT INTO blocklist_sources (name, url, entry_type, enabled)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                url=excluded.url,
-                entry_type=excluded.entry_type,
-                enabled=excluded.enabled
-        """, (name, url, entry_type, int(enabled)))
+        if enabled is None:
+            # Update url and type only; leave enabled untouched
+            conn.execute("""
+                INSERT INTO blocklist_sources (name, url, entry_type, enabled)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(name) DO UPDATE SET
+                    url=excluded.url,
+                    entry_type=excluded.entry_type
+            """, (name, url, entry_type))
+        else:
+            conn.execute("""
+                INSERT INTO blocklist_sources (name, url, entry_type, enabled)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    url=excluded.url,
+                    entry_type=excluded.entry_type,
+                    enabled=excluded.enabled
+            """, (name, url, entry_type, int(enabled)))
         conn.commit()
     finally:
         if owned:

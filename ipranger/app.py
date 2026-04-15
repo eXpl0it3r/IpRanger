@@ -420,11 +420,23 @@ def create_app():
 
 
 def _seed_blocklist_sources(app):
-    """Ensure blocklist sources from config are present in DB."""
-    from .db import upsert_blocklist_source
+    """Sync blocklist sources from config into the DB.
+
+    New sources are inserted with the enabled flag from config.yaml.
+    Existing sources have their URL and type updated (in case config changed)
+    but their enabled flag is left untouched — so UI toggles survive restarts.
+    """
+    from .db import upsert_blocklist_source, get_blocklist_sources
+    existing = {s['name'] for s in get_blocklist_sources()}
     sources = config.get('blocklists', 'sources', default=[])
     for s in sources:
-        upsert_blocklist_source(s['name'], s['url'], s['type'], enabled=int(s.get('enabled', True)))
+        if s['name'] in existing:
+            # Already in DB — only update url/type, preserve enabled state
+            upsert_blocklist_source(s['name'], s['url'], s['type'], enabled=None)
+        else:
+            # First time — seed with enabled value from config
+            upsert_blocklist_source(s['name'], s['url'], s['type'],
+                                    enabled=int(s.get('enabled', True)))
 
 
 def _seed_private_friendly():

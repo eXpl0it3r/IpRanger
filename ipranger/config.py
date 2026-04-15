@@ -2,6 +2,12 @@ import yaml
 import os
 import copy
 
+# Resolve config.yaml relative to the project root (parent of this package),
+# so it's found regardless of the working directory the app is started from.
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_PACKAGE_DIR)
+_DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, 'config.yaml')
+
 DEFAULT_CONFIG = {
     'server': {
         'host': '0.0.0.0',
@@ -96,7 +102,9 @@ def _deep_merge(base, override):
 
 
 class Config:
-    def __init__(self, path='config.yaml'):
+    def __init__(self, path=None):
+        if path is None:
+            path = _DEFAULT_CONFIG_PATH
         self._data = copy.deepcopy(DEFAULT_CONFIG)
         self._path = path
         self._load(path)
@@ -122,7 +130,10 @@ class Config:
         return node
 
     def get_db_path(self):
-        return self.get('database', 'path', default='ipranger.db')
+        path = self.get('database', 'path', default='ipranger.db')
+        if not os.path.isabs(path):
+            path = os.path.join(_PROJECT_ROOT, path)
+        return path
 
 
 config = Config()
