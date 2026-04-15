@@ -581,7 +581,7 @@ def get_network_stats(page=1, per_page=50, search=None):
             FROM ip_stats
             {where}
             GROUP BY rdap_network
-            ORDER BY total_connections DESC
+            ORDER BY ip_count DESC, total_connections DESC
             LIMIT ? OFFSET ?
         """, params + [per_page, offset])
         rows = [dict(r) for r in cur.fetchall()]
