@@ -23,7 +23,7 @@ DEFAULT_CONFIG = {
                 'name': 'firehol_level1',
                 'url': 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset',
                 'type': 'cidr',
-                'enabled': True,
+                'enabled': False,
             },
             {
                 'name': 'firehol_level2',
@@ -49,6 +49,13 @@ DEFAULT_CONFIG = {
                 'type': 'ip',
                 'enabled': False,
             },
+            {
+                'name': 'cinsscore',
+                'url': 'https://cinsscore.com/list/ci-badguys.txt',
+                'type': 'ip',
+                'enabled': True,
+            }
+
         ],
     },
     'rdap': {
