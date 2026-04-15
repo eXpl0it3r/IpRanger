@@ -2,6 +2,7 @@
 import logging
 import collections
 import threading
+from datetime import datetime, timezone
 
 _MAX_RECORDS = 500
 
@@ -23,7 +24,7 @@ class _RingBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             entry = {
-                'time':    self.formatTime(record, '%H:%M:%S'),
+                'time':    datetime.now().strftime('%H:%M:%S'),
                 'level':   record.levelname,
                 'name':    record.name,
                 'message': self.format(record),
