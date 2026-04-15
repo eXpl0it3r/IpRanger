@@ -8,6 +8,11 @@ DEFAULT_CONFIG = {
         'port': 5000,
         'debug': False,
         'secret_key': 'change-me-in-production',
+        'auth': {
+            'enabled': True,
+            'username': 'admin',
+            'password': 'change-me',
+        },
     },
     'database': {
         'path': 'ipranger.db',

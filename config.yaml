@@ -3,6 +3,10 @@ server:
   port: 5000
   debug: false
   secret_key: "change-me-in-production"
+  auth:
+    enabled: true
+    username: "admin"
+    password: "change-me"
 
 database:
   path: "ipranger.db"

@@ -1,5 +1,6 @@
 import logging
 import math
+import functools
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response
 
@@ -23,6 +24,25 @@ def create_app():
 
     app = Flask(__name__)
     app.secret_key = config.get('server', 'secret_key', default='change-me')
+
+    # ── Basic Auth ────────────────────────────────────────────────────────────
+    _auth_enabled  = config.get('server', 'auth', 'enabled',  default=True)
+    _auth_username = config.get('server', 'auth', 'username', default='admin')
+    _auth_password = config.get('server', 'auth', 'password', default='change-me')
+
+    def _require_auth():
+        if not _auth_enabled:
+            return None
+        creds = request.authorization
+        if creds and creds.username == _auth_username and creds.password == _auth_password:
+            return None
+        return Response(
+            'Unauthorized – please log in.',
+            401,
+            {'WWW-Authenticate': 'Basic realm="IpRanger"'},
+        )
+
+    app.before_request(_require_auth)
 
     # Initialize DB
     with app.app_context():
