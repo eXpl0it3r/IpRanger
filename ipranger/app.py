@@ -28,6 +28,7 @@ def create_app():
     with app.app_context():
         init_db()
         _seed_blocklist_sources(app)
+        _seed_private_friendly()
 
     app.teardown_appcontext(close_db)
 
@@ -367,3 +368,20 @@ def _seed_blocklist_sources(app):
     sources = config.get('blocklists', 'sources', default=[])
     for s in sources:
         upsert_blocklist_source(s['name'], s['url'], s['type'], enabled=int(s.get('enabled', True)))
+
+
+def _seed_private_friendly():
+    """Add all RFC-private/reserved ranges to the friendly list (idempotent)."""
+    from .db import add_friendly
+    from .utils import RFC_PRIVATE_RANGES
+    import logging
+    log = logging.getLogger(__name__)
+    seeded = 0
+    for cidr, label in RFC_PRIVATE_RANGES:
+        try:
+            add_friendly(cidr, label=label, entry_type='cidr')
+            seeded += 1
+        except Exception as e:
+            log.debug(f"Could not seed friendly entry {cidr}: {e}")
+    if seeded:
+        log.info(f"Seeded {seeded} RFC-private ranges into the friendly list")

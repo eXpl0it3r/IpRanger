@@ -1,14 +1,20 @@
 import logging
 import time
 
-from .utils import unmap_ipv4
+from .utils import unmap_ipv4, is_private_ip
 
 logger = logging.getLogger(__name__)
 
 
 def lookup_ip(ip):
-    """Perform RDAP lookup for a single IP. Returns dict or None."""
-    ip = unmap_ipv4(ip)  # ensure we never pass a mapped IPv6 to ipwhois
+    """Perform RDAP lookup for a single IP. Returns dict or None.
+
+    Returns a synthetic local record (no network call) for RFC-private IPs.
+    """
+    ip = unmap_ipv4(ip)
+    if is_private_ip(ip):
+        logger.debug(f"Skipping RDAP for private/reserved IP {ip}")
+        return {'org': 'Local / Reserved', 'network': '', 'asn': '', 'country': ''}
     try:
         from ipwhois import IPWhois
         obj = IPWhois(ip)
@@ -41,7 +47,9 @@ def enrich_pending_ips(limit=10):
         else:
             # Mark as looked up even on failure to avoid retrying bad IPs constantly
             update_rdap(ip, org='', network='', asn='', country='')
-        time.sleep(delay)
+        # No delay needed for private IPs — only throttle real network calls
+        if not is_private_ip(unmap_ipv4(ip)):
+            time.sleep(delay)
     if enriched:
         logger.info(f"Enriched {enriched} IPs with RDAP data")
     return enriched
