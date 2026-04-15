@@ -1,11 +1,14 @@
 import logging
 import time
 
+from .utils import unmap_ipv4
+
 logger = logging.getLogger(__name__)
 
 
 def lookup_ip(ip):
     """Perform RDAP lookup for a single IP. Returns dict or None."""
+    ip = unmap_ipv4(ip)  # ensure we never pass a mapped IPv6 to ipwhois
     try:
         from ipwhois import IPWhois
         obj = IPWhois(ip)

@@ -3,6 +3,8 @@ import re
 import logging
 from datetime import datetime
 
+from .utils import unmap_ipv4
+
 logger = logging.getLogger(__name__)
 
 _PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
@@ -11,17 +13,21 @@ _IPV4_ADDR_RE = re.compile(r'^([\d.]+):(\d+)$')
 
 
 def parse_addr(addr):
-    """Parse IP:port or [IPv6]:port into (ip, port) tuple."""
+    """Parse IP:port or [IPv6]:port into (ip, port) tuple.
+
+    IPv4-mapped IPv6 addresses (e.g. ``::ffff:1.2.3.4``) are unwrapped to
+    plain IPv4 so every caller always works with the canonical form.
+    """
     m = _IPV6_ADDR_RE.match(addr)
     if m:
-        return m.group(1), m.group(2)
+        return unmap_ipv4(m.group(1)), m.group(2)
     m = _IPV4_ADDR_RE.match(addr)
     if m:
         return m.group(1), m.group(2)
     # fallback: split on last colon
     if ':' in addr:
         parts = addr.rsplit(':', 1)
-        return parts[0], parts[1]
+        return unmap_ipv4(parts[0]), parts[1]
     return addr, ''
 
 
