@@ -12,11 +12,15 @@ from .db import (
     get_network_stats, get_ips_for_network,
 )
 from .rdap import lookup_ip
+from . import logbuffer
 
 logger = logging.getLogger(__name__)
 
 
 def create_app():
+    # Install log buffer before anything else so all startup messages are captured
+    logbuffer.install()
+
     app = Flask(__name__)
     app.secret_key = config.get('server', 'secret_key', default='change-me')
 
@@ -304,6 +308,32 @@ def create_app():
         except Exception as e:
             flash(f'Error: {e}', 'error')
         return redirect(url_for('settings'))
+
+    # ── Logs ─────────────────────────────────────────────────────────────────
+
+    @app.route('/logs')
+    def logs():
+        level_filter = request.args.get('level', '').strip()
+        name_filter  = request.args.get('search', '').strip()
+        records = logbuffer.get_records(level_filter=level_filter, name_filter=name_filter)
+        levels  = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+        return render_template('logs.html', records=records, levels=levels,
+                               level_filter=level_filter, name_filter=name_filter)
+
+    @app.route('/partials/logs')
+    def partial_logs():
+        level_filter = request.args.get('level', '').strip()
+        name_filter  = request.args.get('search', '').strip()
+        records = logbuffer.get_records(level_filter=level_filter, name_filter=name_filter)
+        return render_template('partials/log_lines.html', records=records)
+
+    @app.route('/api/logs/clear', methods=['POST'])
+    def api_logs_clear():
+        logbuffer.clear()
+        if request.headers.get('HX-Request'):
+            return render_template('partials/log_lines.html', records=[])
+        flash('Log buffer cleared', 'success')
+        return redirect(url_for('logs'))
 
     # ── Template helpers ─────────────────────────────────────────────────────
 

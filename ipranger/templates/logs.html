@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Logs – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <h1 class="text-2xl font-bold text-gray-900">Application Logs</h1>
+      <p class="text-sm text-gray-500 mt-0.5">Last 200 log entries — auto-refreshes every 5 s</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <!-- Auto-refresh toggle -->
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
+        <input type="checkbox" id="auto-refresh-toggle" checked
+               class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+               onchange="toggleAutoRefresh(this.checked)">
+        Auto-refresh
+      </label>
+      <!-- Clear button -->
+      <button
+        hx-post="{{ url_for('api_logs_clear') }}"
+        hx-target="#log-container"
+        hx-swap="innerHTML"
+        hx-confirm="Clear the log buffer?"
+        class="px-3 py-1.5 text-sm rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
+        Clear
+      </button>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <div class="flex flex-col sm:flex-row gap-3">
+      <!-- Search -->
+      <div class="flex-1 relative">
+        <svg class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none"
+             viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+        </svg>
+        <input
+          id="log-search"
+          type="text"
+          name="search"
+          value="{{ name_filter }}"
+          placeholder="Filter by logger name or message…"
+          class="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          hx-get="{{ url_for('partial_logs') }}"
+          hx-trigger="keyup changed delay:250ms, search"
+          hx-target="#log-container"
+          hx-swap="innerHTML"
+          hx-include="#level-select"
+        />
+      </div>
+      <!-- Level filter -->
+      <select id="level-select" name="level"
+        class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500"
+        hx-get="{{ url_for('partial_logs') }}"
+        hx-trigger="change"
+        hx-target="#log-container"
+        hx-swap="innerHTML"
+        hx-include="#log-search">
+        <option value="" {% if not level_filter %}selected{% endif %}>All levels</option>
+        {% for lvl in levels %}
+          <option value="{{ lvl }}" {% if level_filter == lvl %}selected{% endif %}>{{ lvl }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <!-- Log output -->
+  <div class="bg-gray-950 rounded-xl border border-gray-800 shadow-sm overflow-hidden">
+
+    <!-- Sticky toolbar inside terminal box -->
+    <div class="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
+      <span class="text-xs text-gray-500 font-mono">stdout / application log</span>
+      <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+        <input type="checkbox" id="scroll-bottom" checked
+               class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-400">
+        Scroll to bottom
+      </label>
+    </div>
+
+    <div id="log-container"
+         class="overflow-y-auto font-mono text-xs leading-5 p-4 max-h-[70vh] space-y-px"
+         hx-get="{{ url_for('partial_logs') }}?level={{ level_filter }}&search={{ name_filter }}"
+         hx-trigger="every 5s [document.getElementById('auto-refresh-toggle').checked]"
+         hx-swap="innerHTML"
+         hx-on::after-swap="scrollLogIfNeeded()">
+      {% include "partials/log_lines.html" %}
+    </div>
+  </div>
+
+</div>
+
+<script>
+function scrollLogIfNeeded() {
+  const box = document.getElementById('log-container');
+  const cb  = document.getElementById('scroll-bottom');
+  if (box && cb && cb.checked) {
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+function toggleAutoRefresh(on) {
+  // HTMX re-evaluates the trigger condition dynamically, nothing extra needed
+}
+
+// Scroll on initial load
+document.addEventListener('DOMContentLoaded', scrollLogIfNeeded);
+</script>
+{% endblock %}

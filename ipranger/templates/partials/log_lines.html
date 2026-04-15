@@ -1,0 +1,12 @@
+{% if records %}
+  {% for r in records %}
+  <div class="flex gap-3 hover:bg-white/5 px-1 rounded whitespace-pre-wrap break-all">
+    <span class="shrink-0 text-gray-600 select-none">{{ r.time }}</span>
+    <span class="shrink-0 w-16 font-semibold {{ r.colour }}">{{ r.level }}</span>
+    <span class="shrink-0 text-gray-500 max-w-[14rem] truncate" title="{{ r.name }}">{{ r.name }}</span>
+    <span class="{{ r.colour }}">{{ r.message }}</span>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="text-gray-600 italic">No log entries yet.</p>
+{% endif %}
