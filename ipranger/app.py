@@ -9,7 +9,7 @@ from .db import (
     get_blocklist_sources, get_blocklist_entries, get_friendly_entries,
     get_blocked_entries, block_ip, unblock_ip, add_friendly, remove_friendly,
     update_rdap, get_top_ips, upsert_blocklist_source,
-    get_network_stats, get_ips_for_network,
+    get_network_stats, get_ips_for_network, block_network, unblock_network,
 )
 from .rdap import lookup_ip
 from . import logbuffer
@@ -81,6 +81,43 @@ def create_app():
             return '', 400
         ips = get_ips_for_network(network)
         return render_template('partials/network_ips.html', ips=ips, network=network)
+
+    @app.route('/api/network/block', methods=['POST'])
+    def api_network_block():
+        network = request.form.get('network', '').strip()
+        reason  = request.form.get('reason', 'Blocked via Networks page').strip()
+        if not network:
+            return jsonify({'error': 'network required'}), 400
+        block_network(network, reason)
+        try:
+            from .ipset import add_to_ipset, create_ipset
+            create_ipset()
+            add_to_ipset(network)
+        except Exception as e:
+            logger.warning(f"ipset add failed for network {network}: {e}")
+        if request.headers.get('HX-Request'):
+            # Return just the updated action cell for this row
+            return render_template('partials/network_action.html',
+                                   network=network, network_blocked=True)
+        flash(f'Blocked network {network}', 'success')
+        return redirect(url_for('networks'))
+
+    @app.route('/api/network/unblock', methods=['POST'])
+    def api_network_unblock():
+        network = request.form.get('network', '').strip()
+        if not network:
+            return jsonify({'error': 'network required'}), 400
+        unblock_network(network)
+        try:
+            from .ipset import remove_from_ipset
+            remove_from_ipset(network)
+        except Exception as e:
+            logger.warning(f"ipset remove failed for network {network}: {e}")
+        if request.headers.get('HX-Request'):
+            return render_template('partials/network_action.html',
+                                   network=network, network_blocked=False)
+        flash(f'Unblocked network {network}', 'success')
+        return redirect(url_for('networks'))
 
     @app.route('/blocked')
     def blocked():

@@ -1,0 +1,34 @@
+{% if network_blocked %}
+<td id="action-{{ network | replace('/', '-') | replace('.', '-') | replace(':', '-') }}"
+    class="px-4 py-3 whitespace-nowrap">
+  <form method="post" action="{{ url_for('api_network_unblock') }}"
+        onclick="event.stopPropagation()"
+        hx-post="{{ url_for('api_network_unblock') }}"
+        hx-vals='{"network": "{{ network }}"}'
+        hx-target="#action-{{ network | replace('/', '-') | replace('.', '-') | replace(':', '-') }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="network" value="{{ network }}">
+    <button type="submit"
+            class="px-3 py-1 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 transition-colors">
+      Unblock
+    </button>
+  </form>
+</td>
+{% else %}
+<td id="action-{{ network | replace('/', '-') | replace('.', '-') | replace(':', '-') }}"
+    class="px-4 py-3 whitespace-nowrap">
+  <form method="post" action="{{ url_for('api_network_block') }}"
+        onclick="event.stopPropagation()"
+        hx-post="{{ url_for('api_network_block') }}"
+        hx-vals='{"network": "{{ network }}", "reason": "Blocked via Networks page"}'
+        hx-target="#action-{{ network | replace('/', '-') | replace('.', '-') | replace(':', '-') }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="network" value="{{ network }}">
+    <input type="hidden" name="reason" value="Blocked via Networks page">
+    <button type="submit"
+            class="px-3 py-1 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50 transition-colors">
+      Block network
+    </button>
+  </form>
+</td>
+{% endif %}

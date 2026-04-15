@@ -559,7 +559,11 @@ def get_network_stats(page=1, per_page=50, search=None):
                 SUM(is_blocked)                     AS blocked_count,
                 SUM(CASE WHEN is_flagged=1 AND is_blocked=0 THEN 1 ELSE 0 END) AS flagged_count,
                 SUM(is_friendly)                    AS friendly_count,
-                MAX(last_seen)                      AS last_seen
+                MAX(last_seen)                      AS last_seen,
+                EXISTS(
+                    SELECT 1 FROM blocked_entries
+                    WHERE entry = rdap_network AND entry_type = 'cidr'
+                )                                   AS network_blocked
             FROM ip_stats
             {where}
             GROUP BY rdap_network
@@ -587,6 +591,58 @@ def get_ips_for_network(network):
             ORDER BY connection_count DESC
         """, (network,))
         return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def block_network(network, reason=''):
+    """Block a network CIDR range.
+
+    Inserts the CIDR into blocked_entries and marks all known IPs that belong
+    to this rdap_network as blocked in ip_stats.
+    """
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO blocked_entries (entry, entry_type, reason)
+            VALUES (?, 'cidr', ?)
+        """, (network, reason))
+        conn.execute("""
+            UPDATE ip_stats SET is_blocked = 1
+            WHERE rdap_network = ?
+        """, (network,))
+        conn.commit()
+        logger.info(f"Blocked network {network}")
+    except Exception as e:
+        logger.error(f"block_network failed for {network}: {e}")
+        conn.rollback()
+    finally:
+        if owned:
+            conn.close()
+
+
+def unblock_network(network):
+    """Unblock a network CIDR range.
+
+    Removes the CIDR from blocked_entries and clears the blocked flag on all
+    IPs that belong to this rdap_network (unless they were individually blocked
+    by another entry too).
+    """
+    conn, owned = _db()
+    try:
+        conn.execute("DELETE FROM blocked_entries WHERE entry = ?", (network,))
+        # Only clear is_blocked on IPs that have no individual block entry
+        conn.execute("""
+            UPDATE ip_stats SET is_blocked = 0
+            WHERE rdap_network = ?
+              AND ip NOT IN (SELECT entry FROM blocked_entries WHERE entry_type = 'ip')
+        """, (network,))
+        conn.commit()
+        logger.info(f"Unblocked network {network}")
+    except Exception as e:
+        logger.error(f"unblock_network failed for {network}: {e}")
+        conn.rollback()
     finally:
         if owned:
             conn.close()

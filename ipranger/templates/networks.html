@@ -51,6 +51,7 @@
           <th class="px-4 py-3 text-right font-semibold text-gray-600">Connections</th>
           <th class="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
           <th class="px-4 py-3 text-left font-semibold text-gray-600">Last seen</th>
+          <th class="px-4 py-3 text-left font-semibold text-gray-600">Actions</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100" id="networks-tbody">
@@ -96,10 +97,13 @@
           <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">
             {{ row.last_seen[:16].replace('T', ' ') if row.last_seen else '–' }}
           </td>
+          {% with network=row.network, network_blocked=row.network_blocked %}
+            {% include "partials/network_action.html" %}
+          {% endwith %}
         </tr>
         <!-- Expandable IP sub-table row -->
         <tr id="expand-{{ slug }}" class="hidden">
-          <td colspan="9" class="p-0 bg-indigo-50/40">
+          <td colspan="10" class="p-0 bg-indigo-50/40">
             <div
               id="network-ips-{{ slug }}"
               hx-get="/partials/network-ips?network={{ row.network | urlencode }}"
