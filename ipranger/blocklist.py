@@ -45,8 +45,18 @@ def parse_blocklist_content(content, entry_type):
     return entries
 
 
+def _push_to_ipset(entries):
+    """Push IP/CIDR entries to ipset. Silently skips if ipset is unavailable."""
+    try:
+        from .ipset import bulk_add_to_ipset
+        added = bulk_add_to_ipset(entries)
+        logger.info(f"Pushed {added} entries to ipset")
+    except Exception as e:
+        logger.warning(f"Could not push entries to ipset: {e}")
+
+
 def refresh_all_blocklists():
-    """Fetch and update all enabled block lists from config."""
+    """Fetch, store, and push to ipset all enabled block lists from config."""
     from .config import config
     from .db import upsert_blocklist_source, update_blocklist_entries
 
@@ -62,6 +72,7 @@ def refresh_all_blocklists():
         entries = fetch_blocklist(url, entry_type)
         if entries:
             update_blocklist_entries(name, entries)
+            _push_to_ipset(entries)
             updated += 1
             logger.info(f"Updated blocklist {name}: {len(entries)} entries")
         else:
@@ -80,6 +91,7 @@ def refresh_blocklist_source(source_name):
             entries = fetch_blocklist(source['url'], source['type'])
             if entries:
                 update_blocklist_entries(source['name'], entries)
+                _push_to_ipset(entries)
                 logger.info(f"Refreshed blocklist {source_name}: {len(entries)} entries")
             return len(entries)
     logger.warning(f"Blocklist source not found: {source_name}")

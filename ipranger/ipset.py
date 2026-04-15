@@ -109,17 +109,61 @@ def remove_iptables_rule():
     return rc == 0
 
 
+def bulk_add_to_ipset(entries):
+    """Add multiple IP/CIDR entries to the ipset in a single batch.
+
+    *entries* is an iterable of strings (IP or CIDR) or (entry, type) tuples.
+    ASN entries are silently skipped. Saves the ipset once at the end.
+    Returns the number of entries successfully added.
+    """
+    create_ipset()
+    name = get_set_name()
+    added = 0
+    for item in entries:
+        entry = item[0] if isinstance(item, (list, tuple)) else item
+        entry_type = item[1] if isinstance(item, (list, tuple)) else None
+        if entry_type == 'asn':
+            continue
+        # Skip plain ASN strings even without a type tag
+        if isinstance(entry, str) and entry.upper().startswith('AS') and entry[2:].isdigit():
+            continue
+        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry], check=False)
+        if rc == 0:
+            added += 1
+        else:
+            logger.debug(f"Could not add {entry} to ipset (skipping)")
+    if added and config.get('ipset', 'persist', default=True):
+        save_ipset()
+    return added
+
+
 def sync_ipset_from_db():
-    """Rebuild ipset from blocked_entries in DB."""
-    from .db import get_blocked_entries
+    """Rebuild ipset from both blocked_entries and blocklist_entries in DB."""
+    from .db import get_blocked_entries, get_blocklist_entries
     create_ipset()
     flush_ipset()
-    entries, total = get_blocked_entries(page=1, per_page=100000)
+
+    # Add manually blocked entries
+    blocked, _ = get_blocked_entries(page=1, per_page=100000)
     added = 0
-    for entry in entries:
-        if add_to_ipset(entry['entry']):
+    name = get_set_name()
+    for entry in blocked:
+        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry['entry']], check=False)
+        if rc == 0:
             added += 1
-    logger.info(f"Synced ipset: {added}/{total} entries")
+
+    # Add blocklist entries (IPs and CIDRs only)
+    bl_entries, _ = get_blocklist_entries(page=1, per_page=10000000)
+    for entry in bl_entries:
+        if entry.get('entry_type') == 'asn':
+            continue
+        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry['entry']], check=False)
+        if rc == 0:
+            added += 1
+
+    if config.get('ipset', 'persist', default=True):
+        save_ipset()
+    logger.info(f"Synced ipset: {added} entries (blocked + blocklists)")
     return added
 
 
