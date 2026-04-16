@@ -16,6 +16,11 @@ _IPV4_ADDR_RE = re.compile(r'^([\d.]+):(\d+)$')
 _active_connections: dict[tuple, dict] = {}
 
 
+def get_live_connection_count() -> int:
+    """Return the number of currently open TCP connections (last poll snapshot)."""
+    return len(_active_connections)
+
+
 def parse_addr(addr):
     """Parse IP:port or [IPv6]:port into (ip, port) tuple.
 
@@ -90,6 +95,11 @@ def get_connections():
     except Exception as e:
         logger.error(f"Failed to run ss: {e}")
         return []
+
+
+def get_live_connection_count() -> int:
+    """Return the number of currently open TCP connections from the last poll."""
+    return len(_active_connections)
 
 
 def record_connections():

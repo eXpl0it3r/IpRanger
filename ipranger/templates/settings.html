@@ -113,5 +113,34 @@
     </div>
   </section>
 
+  <!-- Danger Zone -->
+  <section class="bg-white rounded-xl border border-red-200 shadow-sm">
+    <div class="px-6 py-4 border-b border-red-100">
+      <h2 class="text-base font-semibold text-red-700">Danger Zone</h2>
+      <p class="text-xs text-gray-500 mt-0.5">Destructive actions — cannot be undone</p>
+    </div>
+    <div class="px-6 py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+      <div>
+        <p class="text-sm font-medium text-gray-800">Clear IP Connection History</p>
+        <p class="text-xs text-gray-500 mt-0.5">
+          Resets all connection counts, first/last seen timestamps, flagged and blocked states.
+          RDAP data (org, network, ASN, country) is <strong>retained</strong>.
+          Also clears the blocked entries list.
+        </p>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <span id="clear-history-feedback"></span>
+        <button
+          hx-post="{{ url_for('api_clear_history') }}"
+          hx-target="#clear-history-feedback"
+          hx-swap="innerHTML"
+          hx-confirm="This will reset all connection history and unblock all IPs. RDAP data is kept. Continue?"
+          class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors whitespace-nowrap">
+          Clear History
+        </button>
+      </div>
+    </div>
+  </section>
+
 </div>
 {% endblock %}

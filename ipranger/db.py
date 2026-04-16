@@ -227,6 +227,7 @@ def get_ip_detail(ip):
 
 def get_overview_stats():
     """Return dict with aggregate stats."""
+    from .monitor import get_live_connection_count
     conn, owned = _db()
     try:
         cur = conn.cursor()
@@ -255,6 +256,7 @@ def get_overview_stats():
             'flagged_count': flagged_count,
             'blocklist_entries_count': blocklist_entries_count,
             'friendly_count': friendly_count,
+            'live_connections': get_live_connection_count(),
         }
     finally:
         if owned:
@@ -514,6 +516,61 @@ def mark_flagged(ip):
     try:
         conn.execute("UPDATE ip_stats SET is_flagged = 1 WHERE ip = ?", (ip,))
         conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+def clear_ip_history():
+    """Reset connection history in ip_stats while retaining RDAP data.
+
+    Resets connection_count, first_seen, last_seen, and is_flagged to their
+    zero/null state. RDAP fields are kept so the next connections for those IPs
+    are immediately enriched without a new lookup.
+    """
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            UPDATE ip_stats SET
+                connection_count = 0,
+                first_seen       = NULL,
+                last_seen        = NULL,
+                is_flagged       = 0
+        """)
+        conn.commit()
+        logger.info("IP connection history cleared (RDAP data retained)")
+    except Exception as e:
+        logger.error(f"clear_ip_history failed: {e}")
+        conn.rollback()
+    finally:
+        if owned:
+            conn.close()
+
+
+def clear_ip_history():
+    """Reset connection history for all IPs while preserving RDAP data.
+
+    Resets: connection_count, first_seen, last_seen, is_flagged, is_blocked.
+    Preserves: rdap_org, rdap_network, rdap_asn, rdap_country, rdap_looked_up,
+               rdap_looked_up_at, is_friendly.
+    Also clears the blocked_entries table since block state is tied to history.
+    """
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            UPDATE ip_stats SET
+                connection_count = 0,
+                first_seen       = NULL,
+                last_seen        = NULL,
+                is_flagged       = 0,
+                is_blocked       = 0
+        """)
+        conn.execute("DELETE FROM blocked_entries")
+        conn.commit()
+        logger.info("IP connection history cleared (RDAP data retained)")
+    except Exception as e:
+        logger.error(f"clear_ip_history failed: {e}")
+        conn.rollback()
     finally:
         if owned:
             conn.close()

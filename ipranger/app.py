@@ -11,6 +11,7 @@ from .db import (
     get_blocked_entries, block_ip, unblock_ip, add_friendly, remove_friendly,
     update_rdap, get_top_ips, upsert_blocklist_source,
     get_network_stats, get_ips_for_network, block_network, unblock_network,
+    clear_ip_history,
 )
 from .rdap import lookup_ip
 from . import logbuffer
@@ -63,7 +64,9 @@ def create_app():
 
     @app.route('/')
     def index():
+        from .monitor import get_live_connection_count
         stats = get_overview_stats()
+        stats['live_connections'] = get_live_connection_count()
         top_ips = get_top_ips(10)
         return render_template('index.html', stats=stats, top_ips=top_ips)
 
@@ -184,7 +187,9 @@ def create_app():
 
     @app.route('/partials/overview')
     def partial_overview():
+        from .monitor import get_live_connection_count
         stats = get_overview_stats()
+        stats['live_connections'] = get_live_connection_count()
         return render_template('partials/overview_cards.html', stats=stats)
 
     @app.route('/partials/stats')
@@ -392,6 +397,32 @@ def create_app():
             return render_template('partials/log_lines.html', records=[])
         flash('Log buffer cleared', 'success')
         return redirect(url_for('logs'))
+
+    @app.route('/api/history/clear', methods=['POST'])
+    def api_clear_history():
+        from .monitor import _active_connections
+        clear_ip_history()
+        _active_connections.clear()
+        if request.headers.get('HX-Request'):
+            return '<span class="text-green-600 text-xs font-medium">✓ History cleared</span>'
+        flash('IP connection history cleared. RDAP data has been retained.', 'success')
+        return redirect(url_for('settings'))
+
+    @app.route('/api/clear-history', methods=['POST'])
+    def api_clear_history():
+        try:
+            clear_ip_history()
+            # Reset the in-memory connection snapshot too so counts start fresh
+            from .monitor import _active_connections
+            _active_connections.clear()
+            if request.headers.get('HX-Request'):
+                return '<span class="text-green-600 text-sm font-medium">History cleared.</span>'
+            flash('IP connection history cleared (RDAP data retained)', 'success')
+        except Exception as e:
+            if request.headers.get('HX-Request'):
+                return f'<span class="text-red-600 text-sm">Error: {e}</span>'
+            flash(f'Error clearing history: {e}', 'error')
+        return redirect(url_for('settings'))
 
     # ── Template helpers ─────────────────────────────────────────────────────
 
