@@ -399,15 +399,6 @@ def create_app():
         return redirect(url_for('logs'))
 
     @app.route('/api/history/clear', methods=['POST'])
-    def api_clear_history():
-        from .monitor import _active_connections
-        clear_ip_history()
-        _active_connections.clear()
-        if request.headers.get('HX-Request'):
-            return '<span class="text-green-600 text-xs font-medium">✓ History cleared</span>'
-        flash('IP connection history cleared. RDAP data has been retained.', 'success')
-        return redirect(url_for('settings'))
-
     @app.route('/api/clear-history', methods=['POST'])
     def api_clear_history():
         try:
