@@ -1,36 +1,102 @@
+"""Flask application for IpRanger V2."""
 import logging
 import math
-import functools
+from ipaddress import ip_network
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, Response
+from flask import (
+    Flask, render_template, request, jsonify,
+    redirect, url_for, flash, Response,
+)
 
 from .config import config
 from .db import (
-    init_db, close_db, get_ip_stats, get_ip_detail, get_overview_stats,
-    get_blocklist_sources, get_blocklist_entries, get_friendly_entries,
-    get_blocked_entries, block_ip, unblock_ip, add_friendly, remove_friendly,
-    update_rdap, get_top_ips, upsert_blocklist_source,
-    get_network_stats, get_ips_for_network, block_network, unblock_network,
-    clear_ip_history,
+    init_db, close_db,
+    get_overview_stats,
+    get_live_ips_with_asn,
+    get_network_groups,
+    get_live_ips_for_group,
+    get_cidrs_for_group,
+    get_manual_blocks, add_manual_block, remove_manual_block,
+    get_whitelist_entries, add_whitelist_entry, remove_whitelist_entry,
+    is_whitelisted, get_whitelist_checker,
+    rename_network_group,
+    get_blocklist_sources, seed_blocklist_source,
+    get_blocklist_entries_page,
+    get_ips_missing_asn,
 )
-from .rdap import lookup_ip
 from . import logbuffer
 
 logger = logging.getLogger(__name__)
 
 
+# ── Block-state helpers ───────────────────────────────────────────────────────
+
+def _blocking_context():
+    """Snapshot of manual blocks (as parsed networks) and active enforcement sets."""
+    manual_nets = []
+    for block in get_manual_blocks():
+        try:
+            manual_nets.append(ip_network(block['entry'], strict=False))
+        except ValueError:
+            continue
+    try:
+        from .ipset import get_active_block_sets
+        active_sets = get_active_block_sets()
+    except Exception:
+        active_sets = []
+    return manual_nets, active_sets
+
+
+def _cidr_block_states(cidrs, manual_nets, active_sets):
+    """Per-CIDR block state: covered by a manual block (DB) and/or enforced in kernel."""
+    from .ipset import test_entry_enforced
+    states = []
+    for cidr in cidrs:
+        db_blocked = False
+        try:
+            net = ip_network(cidr, strict=False)
+            db_blocked = any(
+                net.version == b.version and net.subnet_of(b) for b in manual_nets)
+        except ValueError:
+            pass
+        enforced = bool(active_sets) and test_entry_enforced(cidr, active_sets)
+        states.append({'cidr': cidr, 'db_blocked': db_blocked, 'enforced': enforced,
+                       'blocked': db_blocked or enforced})
+    return states
+
+
+def _annotated_network_groups():
+    """Network groups annotated with block status: 'full', 'partial' or 'none'."""
+    groups = get_network_groups()
+    manual_nets, active_sets = _blocking_context()
+    for g in groups:
+        states = _cidr_block_states(
+            get_cidrs_for_group(g['network_name'], g['asn']),
+            manual_nets, active_sets)
+        g['total_cidrs'] = len(states)
+        g['blocked_count'] = sum(1 for s in states if s['blocked'])
+        g['enforced_count'] = sum(1 for s in states if s['enforced'])
+        if states and g['blocked_count'] == len(states):
+            g['block_status'] = 'full'
+        elif g['blocked_count']:
+            g['block_status'] = 'partial'
+        else:
+            g['block_status'] = 'none'
+    return groups
+
+
 def create_app():
-    # Install log buffer before anything else so all startup messages are captured
     logbuffer.install()
 
     app = Flask(__name__)
     app.secret_key = config.get('server', 'secret_key', default='change-me')
 
-    # ── Basic Auth ────────────────────────────────────────────────────────────
+    # ── Basic auth ────────────────────────────────────────────────────────────
     _auth_enabled  = config.get('server', 'auth', 'enabled',  default=True)
     _auth_username = config.get('server', 'auth', 'username', default='admin')
     _auth_password = config.get('server', 'auth', 'password', default='change-me')
 
+    @app.before_request
     def _require_auth():
         if not _auth_enabled:
             return None
@@ -38,275 +104,195 @@ def create_app():
         if creds and creds.username == _auth_username and creds.password == _auth_password:
             return None
         return Response(
-            'Unauthorized – please log in.',
+            'Unauthorized',
             401,
             {'WWW-Authenticate': 'Basic realm="IpRanger"'},
         )
 
-    app.before_request(_require_auth)
-
-    # Initialize DB
+    # ── Init ──────────────────────────────────────────────────────────────────
     with app.app_context():
         init_db()
-        _seed_blocklist_sources(app)
-        _seed_private_friendly()
+        _seed_blocklist_sources()
+        _seed_whitelist_defaults()
 
     app.teardown_appcontext(close_db)
 
-    # Start scheduler
     try:
         from .scheduler import init_scheduler
         init_scheduler(app)
-    except Exception as e:
-        logger.warning(f"Scheduler could not start: {e}")
+    except Exception as exc:
+        logger.warning(f"Scheduler could not start: {exc}")
 
-    # ── Page routes ──────────────────────────────────────────────────────────
+    def _annotate_whitelisted(rows):
+        """Mark each row (dict with 'ip') as whitelisted or not."""
+        check = get_whitelist_checker()
+        for row in rows:
+            row['whitelisted'] = check(row['ip'])
+        return rows
 
+    # ── Dashboard (live connections) ──────────────────────────────────────────
     @app.route('/')
     def index():
-        from .monitor import get_live_connection_count
         stats = get_overview_stats()
-        stats['live_connections'] = get_live_connection_count()
-        top_ips = get_top_ips(10)
-        return render_template('index.html', stats=stats, top_ips=top_ips)
+        live_ips = _annotate_whitelisted(get_live_ips_with_asn())
+        return render_template('index.html', stats=stats, live_ips=live_ips)
 
-    @app.route('/stats')
-    def stats():
-        page = int(request.args.get('page', 1))
-        search = request.args.get('search', '').strip()
-        sort = request.args.get('sort', 'connection_count')
-        per_page = 50
-        rows, total = get_ip_stats(page=page, per_page=per_page, sort=sort, search=search or None)
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template(
-            'stats.html',
-            rows=rows, page=page, total=total,
-            total_pages=total_pages, search=search, sort=sort,
-        )
+    @app.route('/partials/live-ips')
+    def partial_live_ips():
+        live_ips = _annotate_whitelisted(get_live_ips_with_asn())
+        return render_template('partials/live_ips_table.html', live_ips=live_ips)
 
+    @app.route('/partials/stats-cards')
+    def partial_stats_cards():
+        stats = get_overview_stats()
+        return render_template('partials/stats_cards.html', stats=stats)
+
+    # ── Networks (ASN groups) ─────────────────────────────────────────────────
     @app.route('/networks')
     def networks():
-        page = int(request.args.get('page', 1))
-        search = request.args.get('search', '').strip()
-        per_page = 50
-        rows, total = get_network_stats(page=page, per_page=per_page, search=search or None)
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template(
-            'networks.html',
-            rows=rows, page=page, total=total,
-            total_pages=total_pages, search=search,
-        )
+        groups = _annotated_network_groups()
+        return render_template('networks.html', groups=groups)
 
-    @app.route('/partials/network-ips')
-    def partial_network_ips():
-        network = request.args.get('network', '').strip()
-        if not network:
-            return '', 400
-        ips = get_ips_for_network(network)
-        return render_template('partials/network_ips.html', ips=ips, network=network)
+    @app.route('/partials/group-live-ips')
+    def partial_group_live_ips():
+        network_name = request.args.get('network_name', '')
+        asn = request.args.get('asn', '')
+        ips = _annotate_whitelisted(get_live_ips_for_group(network_name, asn))
+        manual_nets, active_sets = _blocking_context()
+        cidr_states = _cidr_block_states(
+            get_cidrs_for_group(network_name, asn), manual_nets, active_sets)
+        return render_template('partials/group_live_ips.html', ips=ips,
+                               cidr_states=cidr_states,
+                               network_name=network_name, asn=asn)
 
-    @app.route('/api/network/block', methods=['POST'])
-    def api_network_block():
-        network = request.form.get('network', '').strip()
-        reason  = request.form.get('reason', 'Blocked via Networks page').strip()
-        if not network:
-            return jsonify({'error': 'network required'}), 400
-        block_network(network, reason)
-        try:
-            from .ipset import add_to_ipset, create_ipset
-            create_ipset()
-            add_to_ipset(network)
-        except Exception as e:
-            logger.warning(f"ipset add failed for network {network}: {e}")
+    @app.route('/api/networks/rename', methods=['POST'])
+    def api_network_rename():
+        network_name = request.form.get('network_name', '').strip()
+        asn = request.form.get('asn', '').strip()
+        new_name = (request.headers.get('HX-Prompt')
+                    or request.form.get('new_name', '')).strip()
+        if not network_name or not new_name:
+            return jsonify({'error': 'network_name and new_name required'}), 400
+        rename_network_group(network_name, asn, new_name)
         if request.headers.get('HX-Request'):
-            # Return just the updated action cell for this row
-            return render_template('partials/network_action.html',
-                                   network=network, network_blocked=True)
-        flash(f'Blocked network {network}', 'success')
+            return render_template('partials/network_groups_table.html',
+                                   groups=_annotated_network_groups())
+        flash(f'Renamed {network_name} to {new_name}', 'success')
         return redirect(url_for('networks'))
 
-    @app.route('/api/network/unblock', methods=['POST'])
-    def api_network_unblock():
-        network = request.form.get('network', '').strip()
-        if not network:
-            return jsonify({'error': 'network required'}), 400
-        unblock_network(network)
+    @app.route('/api/networks/refresh-asn', methods=['POST'])
+    def api_network_refresh_asn():
+        network_name = request.form.get('network_name', '').strip()
+        asn = request.form.get('asn', '').strip()
+        if not network_name:
+            return jsonify({'error': 'network_name required'}), 400
+        from .rdap import refresh_group_asn
         try:
-            from .ipset import remove_from_ipset
-            remove_from_ipset(network)
-        except Exception as e:
-            logger.warning(f"ipset remove failed for network {network}: {e}")
+            count = refresh_group_asn(network_name, asn)
+        except Exception as exc:
+            logger.error(f"ASN refresh failed for {network_name}: {exc}")
+            if request.headers.get('HX-Request'):
+                return Response(f'ASN refresh failed: {exc}', 500)
+            flash(f'ASN refresh failed: {exc}', 'error')
+            return redirect(url_for('networks'))
         if request.headers.get('HX-Request'):
-            return render_template('partials/network_action.html',
-                                   network=network, network_blocked=False)
-        flash(f'Unblocked network {network}', 'success')
+            return render_template('partials/network_groups_table.html',
+                                   groups=_annotated_network_groups())
+        flash(f'Refreshed ASN info for {count} IP(s)', 'success')
         return redirect(url_for('networks'))
 
-    @app.route('/blocked')
-    def blocked():
-        page = int(request.args.get('page', 1))
-        per_page = 50
-        entries, total = get_blocked_entries(page=page, per_page=per_page)
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template('blocked.html', entries=entries, page=page,
-                               total=total, total_pages=total_pages)
-
-    @app.route('/bad-ips')
-    def bad_ips():
+    # ── Blocking ──────────────────────────────────────────────────────────────
+    @app.route('/blocking')
+    def blocking():
+        manual_blocks = get_manual_blocks()
+        sources = get_blocklist_sources()
         source_filter = request.args.get('source', '').strip()
         page = int(request.args.get('page', 1))
-        per_page = 50
-        entries, total = get_blocklist_entries(
-            source_name=source_filter or None, page=page, per_page=per_page
-        )
-        total_pages = max(1, math.ceil(total / per_page))
-        sources = get_blocklist_sources()
+        bl_entries, bl_total = get_blocklist_entries_page(
+            source_name=source_filter or None, page=page, per_page=50)
+        bl_total_pages = max(1, math.ceil(bl_total / 50))
+        try:
+            from .ipset import get_ipset_status
+            ipset_status = get_ipset_status()
+        except Exception:
+            ipset_status = {'available': False, 'sets': {}, 'iptables_rules': []}
         return render_template(
-            'bad_ips.html',
-            entries=entries, sources=sources,
-            source_filter=source_filter,
-            page=page, total=total, total_pages=total_pages,
-        )
-
-    @app.route('/settings')
-    def settings():
-        sources = get_blocklist_sources()
-        friendly = get_friendly_entries()
-        from .ipset import get_ipset_status
-        ipset_status = get_ipset_status()
-        cfg_sources = config.get('blocklists', 'sources', default=[])
-        return render_template(
-            'settings.html',
+            'blocking.html',
+            manual_blocks=manual_blocks,
             sources=sources,
-            friendly=friendly,
+            source_filter=source_filter,
+            bl_entries=bl_entries,
+            bl_total=bl_total,
+            bl_page=page,
+            bl_total_pages=bl_total_pages,
             ipset_status=ipset_status,
-            cfg_sources=cfg_sources,
         )
-
-    # ── HTMX partials ────────────────────────────────────────────────────────
-
-    @app.route('/partials/overview')
-    def partial_overview():
-        from .monitor import get_live_connection_count
-        stats = get_overview_stats()
-        stats['live_connections'] = get_live_connection_count()
-        return render_template('partials/overview_cards.html', stats=stats)
-
-    @app.route('/partials/stats')
-    def partial_stats():
-        page = int(request.args.get('page', 1))
-        search = request.args.get('search', '').strip()
-        sort = request.args.get('sort', 'connection_count')
-        per_page = 50
-        rows, total = get_ip_stats(page=page, per_page=per_page, sort=sort, search=search or None)
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template(
-            'partials/stats_table.html',
-            rows=rows, page=page, total=total,
-            total_pages=total_pages, search=search, sort=sort,
-        )
-
-    @app.route('/partials/blocked')
-    def partial_blocked():
-        page = int(request.args.get('page', 1))
-        per_page = 50
-        entries, total = get_blocked_entries(page=page, per_page=per_page)
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template('partials/blocked_table.html', entries=entries,
-                               page=page, total=total, total_pages=total_pages)
-
-    @app.route('/partials/bad-ips')
-    def partial_bad_ips():
-        source_filter = request.args.get('source', '').strip()
-        page = int(request.args.get('page', 1))
-        per_page = 50
-        entries, total = get_blocklist_entries(
-            source_name=source_filter or None, page=page, per_page=per_page
-        )
-        total_pages = max(1, math.ceil(total / per_page))
-        return render_template('partials/bad_ips_table.html',
-                               entries=entries, source_filter=source_filter,
-                               page=page, total=total, total_pages=total_pages)
-
-    # ── API endpoints ────────────────────────────────────────────────────────
 
     @app.route('/api/block', methods=['POST'])
     def api_block():
-        ip = request.form.get('ip', '').strip()
+        entry = request.form.get('entry', '').strip()
         reason = request.form.get('reason', '').strip()
-        if not ip:
-            return jsonify({'error': 'IP required'}), 400
-        block_ip(ip, reason)
-        # Optionally add to ipset
-        if config.get('ipset', 'auto_block', default=False):
-            try:
-                from .ipset import add_to_ipset, create_ipset
-                create_ipset()
-                add_to_ipset(ip)
-            except Exception as e:
-                logger.warning(f"ipset add failed: {e}")
+        if not entry:
+            return jsonify({'error': 'entry required'}), 400
+        if is_whitelisted(entry):
+            msg = f'{entry} is whitelisted and cannot be blocked'
+            if request.headers.get('HX-Request'):
+                return Response(msg, 400)
+            flash(msg, 'error')
+            return redirect(url_for('blocking'))
+        add_manual_block(entry, reason)
+        try:
+            from .ipset import add_to_manual, ensure_ipsets
+            ensure_ipsets()
+            add_to_manual(entry)
+        except Exception as exc:
+            logger.warning(f"ipset add failed: {exc}")
         if request.headers.get('HX-Request'):
-            entries, total = get_blocked_entries(page=1, per_page=50)
-            total_pages = max(1, math.ceil(total / 50))
-            return render_template('partials/blocked_table.html', entries=entries,
-                                   page=1, total=total, total_pages=total_pages)
-        flash(f'Blocked {ip}', 'success')
-        return redirect(url_for('blocked'))
+            return render_template('partials/manual_blocks_table.html',
+                                   manual_blocks=get_manual_blocks())
+        flash(f'Blocked {entry}', 'success')
+        return redirect(url_for('blocking'))
 
     @app.route('/api/unblock', methods=['POST'])
     def api_unblock():
-        ip = request.form.get('ip', '').strip()
-        if not ip:
-            return jsonify({'error': 'IP required'}), 400
-        unblock_ip(ip)
-        try:
-            from .ipset import remove_from_ipset
-            remove_from_ipset(ip)
-        except Exception as e:
-            logger.warning(f"ipset remove failed: {e}")
-        if request.headers.get('HX-Request'):
-            entries, total = get_blocked_entries(page=1, per_page=50)
-            total_pages = max(1, math.ceil(total / 50))
-            return render_template('partials/blocked_table.html', entries=entries,
-                                   page=1, total=total, total_pages=total_pages)
-        flash(f'Unblocked {ip}', 'success')
-        return redirect(url_for('blocked'))
-
-    @app.route('/api/friendly/add', methods=['POST'])
-    def api_friendly_add():
-        entry = request.form.get('ip', '').strip()
-        label = request.form.get('label', '').strip()
-        if not entry:
-            return jsonify({'error': 'IP/CIDR required'}), 400
-        add_friendly(entry, label)
-        if request.headers.get('HX-Request'):
-            friendly = get_friendly_entries()
-            return render_template('partials/friendly_table.html', friendly=friendly)
-        flash(f'Added {entry} to friendly list', 'success')
-        return redirect(url_for('settings'))
-
-    @app.route('/api/friendly/remove', methods=['POST'])
-    def api_friendly_remove():
         entry = request.form.get('entry', '').strip()
         if not entry:
             return jsonify({'error': 'entry required'}), 400
-        remove_friendly(entry)
+        remove_manual_block(entry)
+        try:
+            from .ipset import remove_from_manual
+            remove_from_manual(entry)
+        except Exception as exc:
+            logger.warning(f"ipset remove failed: {exc}")
         if request.headers.get('HX-Request'):
-            friendly = get_friendly_entries()
-            return render_template('partials/friendly_table.html', friendly=friendly)
-        flash(f'Removed {entry} from friendly list', 'success')
-        return redirect(url_for('settings'))
+            return render_template('partials/manual_blocks_table.html',
+                                   manual_blocks=get_manual_blocks())
+        flash(f'Unblocked {entry}', 'success')
+        return redirect(url_for('blocking'))
 
-    @app.route('/api/rdap-lookup', methods=['POST'])
-    def api_rdap_lookup():
-        ip = request.form.get('ip', '').strip()
-        if not ip:
-            return jsonify({'error': 'IP required'}), 400
-        data = lookup_ip(ip)
-        if data:
-            update_rdap(ip, **data)
-            return jsonify({'success': True, 'data': data})
-        return jsonify({'success': False, 'error': 'RDAP lookup failed'}), 500
+    @app.route('/api/block-group', methods=['POST'])
+    def api_block_group():
+        """Block all CIDRs belonging to an ASN group."""
+        network_name = request.form.get('network_name', '').strip()
+        asn = request.form.get('asn', '').strip()
+        reason = request.form.get('reason', f'ASN block: {network_name}').strip()
+        if not network_name:
+            return jsonify({'error': 'network_name required'}), 400
+        cidrs = [c for c in get_cidrs_for_group(network_name, asn)
+                 if not is_whitelisted(c)]
+        for cidr in cidrs:
+            add_manual_block(cidr, reason)
+            try:
+                from .ipset import add_to_manual, ensure_ipsets
+                ensure_ipsets()
+                add_to_manual(cidr)
+            except Exception as exc:
+                logger.warning(f"ipset add failed for {cidr}: {exc}")
+        if request.headers.get('HX-Request'):
+            return render_template('partials/network_groups_table.html',
+                                   groups=_annotated_network_groups())
+        flash(f'Blocked {len(cidrs)} CIDR(s) for {network_name}', 'success')
+        return redirect(url_for('networks'))
 
     @app.route('/api/blocklists/refresh', methods=['POST'])
     def api_blocklists_refresh():
@@ -314,80 +300,117 @@ def create_app():
         try:
             count = refresh_all_blocklists()
             if request.headers.get('HX-Request'):
-                sources = get_blocklist_sources()
-                return render_template('partials/sources_table.html', sources=sources)
+                return render_template('partials/sources_table.html',
+                                       sources=get_blocklist_sources())
             flash(f'Refreshed {count} block lists', 'success')
-        except Exception as e:
-            flash(f'Error refreshing block lists: {e}', 'error')
-        return redirect(url_for('settings'))
+        except Exception as exc:
+            flash(f'Error: {exc}', 'error')
+        return redirect(url_for('blocking'))
 
     @app.route('/api/blocklists/refresh/<name>', methods=['POST'])
     def api_blocklist_refresh_one(name):
-        from .blocklist import refresh_blocklist_source
+        from .blocklist import refresh_one_blocklist
         try:
-            count = refresh_blocklist_source(name)
+            count = refresh_one_blocklist(name)
             if request.headers.get('HX-Request'):
-                sources = get_blocklist_sources()
-                return render_template('partials/sources_table.html', sources=sources)
+                return render_template('partials/sources_table.html',
+                                       sources=get_blocklist_sources())
             flash(f'Refreshed {name}: {count} entries', 'success')
-        except Exception as e:
-            flash(f'Error: {e}', 'error')
-        return redirect(url_for('settings'))
+        except Exception as exc:
+            flash(f'Error: {exc}', 'error')
+        return redirect(url_for('blocking'))
 
-    @app.route('/api/ipset/status')
-    def api_ipset_status():
+    @app.route('/api/ipset/sync-blacklist', methods=['POST'])
+    def api_ipset_sync_blacklist():
+        from .ipset import sync_blacklist_from_db, get_ipset_status
+        try:
+            count = sync_blacklist_from_db()
+            if request.headers.get('HX-Request'):
+                return render_template('partials/ipset_status.html',
+                                       ipset_status=get_ipset_status())
+            flash(f'Blacklist ipset synced: {count} entries', 'success')
+        except Exception as exc:
+            flash(f'ipset sync failed: {exc}', 'error')
+        return redirect(url_for('blocking'))
+
+    @app.route('/api/ipset/sync-manual', methods=['POST'])
+    def api_ipset_sync_manual():
+        from .ipset import sync_manual_from_db, get_ipset_status
+        try:
+            count = sync_manual_from_db()
+            if request.headers.get('HX-Request'):
+                return render_template('partials/ipset_status.html',
+                                       ipset_status=get_ipset_status())
+            flash(f'Manual ipset synced: {count} entries', 'success')
+        except Exception as exc:
+            flash(f'ipset sync failed: {exc}', 'error')
+        return redirect(url_for('blocking'))
+
+    @app.route('/api/ipset/ensure-rules', methods=['POST'])
+    def api_ipset_ensure_rules():
+        from .ipset import ensure_iptables_rules, get_ipset_status
+        try:
+            ensure_iptables_rules()
+            if request.headers.get('HX-Request'):
+                return render_template('partials/ipset_status.html',
+                                       ipset_status=get_ipset_status())
+            flash('iptables rules added/verified', 'success')
+        except Exception as exc:
+            flash(f'Error: {exc}', 'error')
+        return redirect(url_for('blocking'))
+
+    @app.route('/partials/ipset-status')
+    def partial_ipset_status():
         from .ipset import get_ipset_status
-        return jsonify(get_ipset_status())
+        return render_template('partials/ipset_status.html',
+                               ipset_status=get_ipset_status())
 
-    @app.route('/api/ipset/sync', methods=['POST'])
-    def api_ipset_sync():
-        from .ipset import sync_ipset_from_db, create_ipset
-        try:
-            create_ipset()
-            count = sync_ipset_from_db()
-            if request.headers.get('HX-Request'):
-                from .ipset import get_ipset_status
-                status = get_ipset_status()
-                return render_template('partials/ipset_status.html', ipset_status=status)
-            flash(f'ipset synced: {count} entries', 'success')
-        except Exception as e:
-            flash(f'ipset sync failed: {e}', 'error')
-        return redirect(url_for('settings'))
+    # ── Whitelist ─────────────────────────────────────────────────────────────
+    @app.route('/whitelist')
+    def whitelist():
+        entries = get_whitelist_entries()
+        return render_template('whitelist.html', entries=entries)
 
-    @app.route('/api/ipset/ensure-rule', methods=['POST'])
-    def api_ipset_ensure_rule():
-        from .ipset import ensure_iptables_rule, create_ipset
-        try:
-            create_ipset()
-            ok = ensure_iptables_rule()
-            if request.headers.get('HX-Request'):
-                from .ipset import get_ipset_status
-                status = get_ipset_status()
-                return render_template('partials/ipset_status.html', ipset_status=status)
-            if ok:
-                flash('iptables rule added/verified', 'success')
-            else:
-                flash('Failed to add iptables rule (run as root?)', 'error')
-        except Exception as e:
-            flash(f'Error: {e}', 'error')
-        return redirect(url_for('settings'))
+    @app.route('/api/whitelist/add', methods=['POST'])
+    def api_whitelist_add():
+        entry = request.form.get('entry', '').strip()
+        label = request.form.get('label', '').strip()
+        if not entry:
+            return jsonify({'error': 'entry required'}), 400
+        add_whitelist_entry(entry, label)
+        if request.headers.get('HX-Request'):
+            return render_template('partials/whitelist_table.html',
+                                   entries=get_whitelist_entries())
+        flash(f'Added {entry} to whitelist', 'success')
+        return redirect(url_for('whitelist'))
 
-    # ── Logs ─────────────────────────────────────────────────────────────────
+    @app.route('/api/whitelist/remove', methods=['POST'])
+    def api_whitelist_remove():
+        entry = request.form.get('entry', '').strip()
+        if not entry:
+            return jsonify({'error': 'entry required'}), 400
+        remove_whitelist_entry(entry)
+        if request.headers.get('HX-Request'):
+            return render_template('partials/whitelist_table.html',
+                                   entries=get_whitelist_entries())
+        flash(f'Removed {entry} from whitelist', 'success')
+        return redirect(url_for('whitelist'))
 
+    # ── Logs ──────────────────────────────────────────────────────────────────
     @app.route('/logs')
     def logs():
         level_filter = request.args.get('level', '').strip()
-        name_filter  = request.args.get('search', '').strip()
-        records = logbuffer.get_records(level_filter=level_filter, name_filter=name_filter)
-        levels  = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-        return render_template('logs.html', records=records, levels=levels,
-                               level_filter=level_filter, name_filter=name_filter)
+        search = request.args.get('search', '').strip()
+        records = logbuffer.get_records(level_filter=level_filter, name_filter=search)
+        return render_template('logs.html', records=records,
+                               levels=['DEBUG','INFO','WARNING','ERROR','CRITICAL'],
+                               level_filter=level_filter, search=search)
 
     @app.route('/partials/logs')
     def partial_logs():
         level_filter = request.args.get('level', '').strip()
-        name_filter  = request.args.get('search', '').strip()
-        records = logbuffer.get_records(level_filter=level_filter, name_filter=name_filter)
+        search = request.args.get('search', '').strip()
+        records = logbuffer.get_records(level_filter=level_filter, name_filter=search)
         return render_template('partials/log_lines.html', records=records)
 
     @app.route('/api/logs/clear', methods=['POST'])
@@ -398,81 +421,39 @@ def create_app():
         flash('Log buffer cleared', 'success')
         return redirect(url_for('logs'))
 
-    @app.route('/api/history/clear', methods=['POST'])
-    @app.route('/api/clear-history', methods=['POST'])
-    def api_clear_history():
-        try:
-            clear_ip_history()
-            # Reset the in-memory connection snapshot too so counts start fresh
-            from .monitor import _active_connections
-            _active_connections.clear()
-            if request.headers.get('HX-Request'):
-                return '<span class="text-green-600 text-sm font-medium">History cleared.</span>'
-            flash('IP connection history cleared (RDAP data retained)', 'success')
-        except Exception as e:
-            if request.headers.get('HX-Request'):
-                return f'<span class="text-red-600 text-sm">Error: {e}</span>'
-            flash(f'Error clearing history: {e}', 'error')
-        return redirect(url_for('settings'))
-
-    # ── Template helpers ─────────────────────────────────────────────────────
-
-    @app.template_filter('status_badge')
-    def status_badge(row):
-        badges = []
-        if row.get('is_blocked'):
-            badges.append('<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-700">Blocked</span>')
-        if row.get('is_flagged') and not row.get('is_blocked'):
-            badges.append('<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-700">Flagged</span>')
-        if row.get('is_friendly'):
-            badges.append('<span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">Friendly</span>')
-        return ' '.join(badges) if badges else '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-gray-100 text-gray-500">-</span>'
-
+    # ── Template globals ──────────────────────────────────────────────────────
     @app.template_global()
     def page_range(current, total):
-        """Generate page numbers for pagination."""
-        pages = set()
-        pages.add(1)
-        pages.add(total)
-        for i in range(max(1, current - 2), min(total + 1, current + 3)):
+        pages = set([1, total])
+        for i in range(max(1, current-2), min(total+1, current+3)):
             pages.add(i)
         return sorted(pages)
 
     return app
 
 
-def _seed_blocklist_sources(app):
-    """Sync blocklist sources from config into the DB.
-
-    New sources are inserted with the enabled flag from config.yaml.
-    Existing sources have their URL and type updated (in case config changed)
-    but their enabled flag is left untouched — so UI toggles survive restarts.
-    """
-    from .db import upsert_blocklist_source, get_blocklist_sources
-    existing = {s['name'] for s in get_blocklist_sources()}
+def _seed_blocklist_sources():
+    from .config import config
     sources = config.get('blocklists', 'sources', default=[])
-    for s in sources:
-        if s['name'] in existing:
-            # Already in DB — only update url/type, preserve enabled state
-            upsert_blocklist_source(s['name'], s['url'], s['type'], enabled=None)
+    existing = {s['name'] for s in get_blocklist_sources()}
+    for src in sources:
+        enabled = int(src.get('enabled', True))
+        if src['name'] not in existing:
+            seed_blocklist_source(src['name'], src['url'], src['type'], enabled)
         else:
-            # First time — seed with enabled value from config
-            upsert_blocklist_source(s['name'], s['url'], s['type'],
-                                    enabled=int(s.get('enabled', True)))
+            # Update url/type only, preserve enabled state from DB
+            seed_blocklist_source(src['name'], src['url'], src['type'],
+                                  enabled=enabled)
 
 
-def _seed_private_friendly():
-    """Add all RFC-private/reserved ranges to the friendly list (idempotent)."""
-    from .db import add_friendly
+def _seed_whitelist_defaults():
+    """Add RFC-private / reserved ranges to whitelist (idempotent)."""
     from .utils import RFC_PRIVATE_RANGES
-    import logging
-    log = logging.getLogger(__name__)
+    existing = {e['entry'] for e in get_whitelist_entries()}
     seeded = 0
     for cidr, label in RFC_PRIVATE_RANGES:
-        try:
-            add_friendly(cidr, label=label, entry_type='cidr')
+        if cidr not in existing:
+            add_whitelist_entry(cidr, label)
             seeded += 1
-        except Exception as e:
-            log.debug(f"Could not seed friendly entry {cidr}: {e}")
     if seeded:
-        log.info(f"Seeded {seeded} RFC-private ranges into the friendly list")
+        logger.info(f"Seeded {seeded} RFC-private ranges into whitelist")

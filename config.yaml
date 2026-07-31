@@ -13,19 +13,10 @@ database:
 
 monitoring:
   interval_seconds: 10
-  flag_threshold: 500
 
 blocklists:
   update_interval_hours: 24
   sources:
-    - name: "firehol_level1"
-      url: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset"
-      type: "cidr"
-      enabled: false
-    - name: "firehol_level2"
-      url: "https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset"
-      type: "cidr"
-      enabled: false
     - name: "emerging_threats"
       url: "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
       type: "ip"
@@ -34,29 +25,13 @@ blocklists:
       url: "https://www.spamhaus.org/drop/drop.txt"
       type: "cidr"
       enabled: true
-    - name: "tor_exit_nodes"
-      url: "https://check.torproject.org/torbulkexitlist"
-      type: "ip"
-      enabled: false
     - name: "cinsscore"
       url: "https://cinsscore.com/list/ci-badguys.txt"
       type: "ip"
       enabled: true
 
 rdap:
-  cache_ttl_hours: 168
   lookup_delay_seconds: 1
 
 ipset:
-  set_name: "ipranger_blocked"
-  auto_block: false
-  auto_block_threshold: 1000
   persist: true
-
-friendly:
-  ips: []
-  ranges: []
-
-countries:
-  blocking_enabled: false
-  blocked_countries: []

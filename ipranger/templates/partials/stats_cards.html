@@ -1,0 +1,48 @@
+<div id="stats-cards" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4"
+     hx-get="/partials/stats-cards"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wide">Historic IPs</p>
+    <p class="mt-1 text-3xl font-bold text-gray-900">{{ stats.historic_ips }}</p>
+    <p class="text-xs text-gray-400 mt-1">All-time seen</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-teal-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-teal-500 uppercase tracking-wide">Live IPs</p>
+    <p class="mt-1 text-3xl font-bold text-teal-600">{{ stats.live_ips }}</p>
+    <p class="text-xs text-gray-400 mt-1">Connected now</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-teal-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-teal-400 uppercase tracking-wide">Live Conns</p>
+    <p class="mt-1 text-3xl font-bold text-teal-500">{{ stats.live_conns }}</p>
+    <p class="text-xs text-gray-400 mt-1">Open sessions</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-red-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-red-400 uppercase tracking-wide">Blocked</p>
+    <p class="mt-1 text-3xl font-bold text-red-600">{{ stats.manual_blocks }}</p>
+    <p class="text-xs text-gray-400 mt-1">Manual blocks</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-indigo-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-indigo-400 uppercase tracking-wide">Feed Entries</p>
+    <p class="mt-1 text-3xl font-bold text-indigo-700">{{ stats.bl_entries }}</p>
+    <p class="text-xs text-gray-400 mt-1">Threat feeds</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-green-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-green-500 uppercase tracking-wide">Whitelist</p>
+    <p class="mt-1 text-3xl font-bold text-green-600">{{ stats.whitelist }}</p>
+    <p class="text-xs text-gray-400 mt-1">Safe entries</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-yellow-100 shadow-sm p-4">
+    <p class="text-xs font-semibold text-yellow-500 uppercase tracking-wide">ASN Ranges</p>
+    <p class="mt-1 text-3xl font-bold text-yellow-600">{{ stats.asn_ranges }}</p>
+    <p class="text-xs text-gray-400 mt-1">Cached CIDRs</p>
+  </div>
+
+</div>

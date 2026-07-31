@@ -16,8 +16,8 @@
       <td class="px-6 py-3">
         <span class="px-2 py-0.5 rounded text-xs font-medium bg-indigo-50 text-indigo-700">{{ src.entry_type }}</span>
       </td>
-      <td class="px-6 py-3 text-gray-700 font-semibold">{{ src.entry_count or 0 }}</td>
-      <td class="px-6 py-3 text-gray-500 text-xs whitespace-nowrap">{{ (src.last_updated or '-')[:19] }}</td>
+      <td class="px-6 py-3 font-semibold text-gray-700">{{ src.entry_count or 0 }}</td>
+      <td class="px-6 py-3 text-gray-400 text-xs whitespace-nowrap">{{ (src.last_updated or '–')[:19] }}</td>
       <td class="px-6 py-3">
         {% if src.enabled %}
           <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Enabled</span>
@@ -39,7 +39,7 @@
     {% else %}
     <tr>
       <td colspan="6" class="px-6 py-8 text-center text-gray-400 text-sm">
-        No block list sources found. Add them via config.yaml.
+        No blocklist sources found.
       </td>
     </tr>
     {% endfor %}

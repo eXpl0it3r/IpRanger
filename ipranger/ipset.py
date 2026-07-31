@@ -1,3 +1,9 @@
+"""ipset / iptables management for IpRanger V2.
+
+Two ipsets:
+  ipranger_blacklist  - populated from threat-feed blocklists
+  ipranger_manual     - populated from manually-added blocks
+"""
 import subprocess
 import logging
 
@@ -5,180 +11,195 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+SET_BLACKLIST = 'ipranger_blacklist'
+SET_MANUAL = 'ipranger_manual'
 
-def run_cmd(cmd, check=True):
-    """Run a shell command. Returns (returncode, stdout, stderr)."""
+
+def _run(cmd: list, check: bool = True):
+    """Run a command; return (returncode, stdout, stderr)."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if check and result.returncode != 0:
-            logger.error(f"Command failed: {' '.join(cmd)}: {result.stderr.strip()}")
-        return result.returncode, result.stdout, result.stderr
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if check and r.returncode != 0:
+            logger.error(f"Command failed {' '.join(cmd)}: {r.stderr.strip()}")
+        return r.returncode, r.stdout, r.stderr
     except FileNotFoundError:
         logger.warning(f"Command not found: {cmd[0]}")
-        return 127, '', f"Command not found: {cmd[0]}"
-    except Exception as e:
-        logger.error(f"Command error {' '.join(cmd)}: {e}")
-        return 1, '', str(e)
+        return 127, '', f"not found: {cmd[0]}"
+    except Exception as exc:
+        logger.error(f"Command error: {exc}")
+        return 1, '', str(exc)
 
 
-def get_set_name():
-    return config.get('ipset', 'set_name', default='ipranger_blocked')
-
-
-def create_ipset():
-    """Create the ipset if it doesn't exist."""
-    name = get_set_name()
-    rc, _, _ = run_cmd(['ipset', 'list', name], check=False)
+def _ensure_set(name: str):
+    rc, _, _ = _run(['ipset', 'list', name], check=False)
     if rc != 0:
-        rc2, _, err = run_cmd(['ipset', 'create', name, 'hash:net', 'maxelem', '1000000'])
-        if rc2 == 0:
-            logger.info(f"Created ipset {name}")
-        else:
-            logger.error(f"Failed to create ipset {name}: {err}")
-    return rc == 0 or True
+        _run(['ipset', 'create', name, 'hash:net', 'maxelem', '1000000'])
+        logger.info(f"Created ipset {name}")
 
 
-def add_to_ipset(entry):
-    """Add an IP or CIDR to the ipset."""
-    rc, _, err = run_cmd(['ipset', 'add', '-exist', get_set_name(), entry])
-    if rc == 0 and config.get('ipset', 'persist', default=True):
-        save_ipset()
-    return rc == 0
-
-
-def remove_from_ipset(entry):
-    """Remove an IP or CIDR from the ipset."""
-    rc, _, _ = run_cmd(['ipset', 'del', '-exist', get_set_name(), entry], check=False)
-    if rc == 0 and config.get('ipset', 'persist', default=True):
-        save_ipset()
-    return rc == 0
-
-
-def flush_ipset():
-    """Remove all entries from the ipset."""
-    rc, _, _ = run_cmd(['ipset', 'flush', get_set_name()])
-    if rc == 0 and config.get('ipset', 'persist', default=True):
-        save_ipset()
-    return rc == 0
-
-
-def save_ipset():
-    """Save ipset to /etc/ipset.conf."""
-    rc, stdout, err = run_cmd(['ipset', 'save'])
+def _save():
+    if not config.get('ipset', 'persist', default=True):
+        return
+    rc, out, _ = _run(['ipset', 'save'])
     if rc == 0:
         try:
             with open('/etc/ipset.conf', 'w') as f:
-                f.write(stdout)
+                f.write(out)
         except PermissionError:
-            logger.warning("Cannot write /etc/ipset.conf: permission denied")
-    return rc == 0
+            logger.warning("Cannot write /etc/ipset.conf (no root?)")
 
 
-def restore_ipset():
-    """Restore ipset from /etc/ipset.conf."""
-    rc, _, err = run_cmd(['ipset', 'restore', '-exist', '-f', '/etc/ipset.conf'])
-    return rc == 0
+def ensure_ipsets():
+    """Create both ipsets if they don't exist."""
+    _ensure_set(SET_BLACKLIST)
+    _ensure_set(SET_MANUAL)
 
 
-def ensure_iptables_rule():
-    """Add iptables DROP rule for the ipset if not present."""
-    name = get_set_name()
-    rc, _, _ = run_cmd(
-        ['iptables', '-C', 'INPUT', '-m', 'set', '--match-set', name, 'src', '-j', 'DROP'],
-        check=False
-    )
-    if rc != 0:
-        rc2, _, err = run_cmd(
-            ['iptables', '-I', 'INPUT', '-m', 'set', '--match-set', name, 'src', '-j', 'DROP']
-        )
-        if rc2 == 0:
-            logger.info("Added iptables DROP rule for ipset")
-            return True
-        logger.error(f"Failed to add iptables rule: {err}")
-        return False
-    return True  # rule already exists
+# ── Blacklist set (threat feeds) ──────────────────────────────────────────────
+
+def sync_blacklist_from_db():
+    """Flush and rebuild ipranger_blacklist from all enabled blocklist entries."""
+    from .db import get_all_blocklist_entries_for_ipset
+    ensure_ipsets()
+    _run(['ipset', 'flush', SET_BLACKLIST])
+    entries = get_all_blocklist_entries_for_ipset()
+    added = 0
+    for entry, _ in entries:
+        rc, _, _ = _run(['ipset', 'add', '-exist', SET_BLACKLIST, entry], check=False)
+        if rc == 0:
+            added += 1
+    _save()
+    logger.info(f"Blacklist ipset synced: {added} entries")
+    return added
 
 
-def remove_iptables_rule():
-    """Remove iptables DROP rule for the ipset."""
-    name = get_set_name()
-    rc, _, _ = run_cmd(
-        ['iptables', '-D', 'INPUT', '-m', 'set', '--match-set', name, 'src', '-j', 'DROP'],
-        check=False
-    )
-    return rc == 0
-
-
-def bulk_add_to_ipset(entries):
-    """Add multiple IP/CIDR entries to the ipset in a single batch.
-
-    *entries* is an iterable of strings (IP or CIDR) or (entry, type) tuples.
-    ASN entries are silently skipped. Saves the ipset once at the end.
-    Returns the number of entries successfully added.
-    """
-    create_ipset()
-    name = get_set_name()
+def bulk_add_to_blacklist(entries: list):
+    """Add a list of (entry, type) tuples to the blacklist ipset."""
+    ensure_ipsets()
     added = 0
     for item in entries:
         entry = item[0] if isinstance(item, (list, tuple)) else item
-        entry_type = item[1] if isinstance(item, (list, tuple)) else None
-        if entry_type == 'asn':
+        if isinstance(entry, str) and entry.upper().startswith('AS'):
             continue
-        # Skip plain ASN strings even without a type tag
-        if isinstance(entry, str) and entry.upper().startswith('AS') and entry[2:].isdigit():
-            continue
-        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry], check=False)
+        rc, _, _ = _run(['ipset', 'add', '-exist', SET_BLACKLIST, entry], check=False)
         if rc == 0:
             added += 1
-        else:
-            logger.debug(f"Could not add {entry} to ipset (skipping)")
-    if added and config.get('ipset', 'persist', default=True):
-        save_ipset()
+    if added:
+        _save()
     return added
 
 
-def sync_ipset_from_db():
-    """Rebuild ipset from both blocked_entries and blocklist_entries in DB."""
-    from .db import get_blocked_entries, get_blocklist_entries
-    create_ipset()
-    flush_ipset()
+# ── Manual set (user-defined blocks) ─────────────────────────────────────────
 
-    # Add manually blocked entries
-    blocked, _ = get_blocked_entries(page=1, per_page=100000)
+def sync_manual_from_db():
+    """Flush and rebuild ipranger_manual from manual_blocks table."""
+    from .db import get_manual_blocks
+    ensure_ipsets()
+    _run(['ipset', 'flush', SET_MANUAL])
+    blocks = get_manual_blocks()
     added = 0
-    name = get_set_name()
-    for entry in blocked:
-        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry['entry']], check=False)
+    for block in blocks:
+        entry = block['entry']
+        rc, _, _ = _run(['ipset', 'add', '-exist', SET_MANUAL, entry], check=False)
         if rc == 0:
             added += 1
-
-    # Add blocklist entries (IPs and CIDRs only)
-    bl_entries, _ = get_blocklist_entries(page=1, per_page=10000000)
-    for entry in bl_entries:
-        if entry.get('entry_type') == 'asn':
-            continue
-        rc, _, _ = run_cmd(['ipset', 'add', '-exist', name, entry['entry']], check=False)
-        if rc == 0:
-            added += 1
-
-    if config.get('ipset', 'persist', default=True):
-        save_ipset()
-    logger.info(f"Synced ipset: {added} entries (blocked + blocklists)")
+    _save()
+    logger.info(f"Manual ipset synced: {added} entries")
     return added
 
 
-def get_ipset_status():
-    """Return dict with ipset info."""
-    name = get_set_name()
-    rc, stdout, _ = run_cmd(['ipset', 'list', '-t', name], check=False)
+def add_to_manual(entry: str) -> bool:
+    ensure_ipsets()
+    rc, _, _ = _run(['ipset', 'add', '-exist', SET_MANUAL, entry], check=False)
+    if rc == 0:
+        _save()
+    return rc == 0
+
+
+def remove_from_manual(entry: str) -> bool:
+    rc, _, _ = _run(['ipset', 'del', '-exist', SET_MANUAL, entry], check=False)
+    if rc == 0:
+        _save()
+    return rc == 0
+
+
+# ── iptables rule management ──────────────────────────────────────────────────
+
+def _has_rule(set_name: str, chain: str = 'INPUT') -> bool:
+    rc, _, _ = _run(
+        ['iptables', '-C', chain, '-m', 'set', '--match-set', set_name, 'src', '-j', 'DROP'],
+        check=False)
+    return rc == 0
+
+
+def ensure_iptables_rules():
+    """Ensure DROP rules exist for both ipsets."""
+    results = {}
+    for name in (SET_BLACKLIST, SET_MANUAL):
+        if not _has_rule(name):
+            rc, _, err = _run(
+                ['iptables', '-I', 'INPUT', '-m', 'set', '--match-set', name, 'src', '-j', 'DROP'])
+            results[name] = rc == 0
+            if rc == 0:
+                logger.info(f"Added iptables DROP rule for {name}")
+            else:
+                logger.error(f"Failed to add iptables rule for {name}: {err}")
+        else:
+            results[name] = True
+    return results
+
+
+def remove_iptables_rules():
+    for name in (SET_BLACKLIST, SET_MANUAL):
+        if _has_rule(name):
+            _run(['iptables', '-D', 'INPUT', '-m', 'set', '--match-set', name, 'src', '-j', 'DROP'],
+                 check=False)
+
+
+def get_active_block_sets() -> list:
+    """Names of IpRanger ipsets that currently have an active iptables DROP rule."""
+    return [name for name in (SET_BLACKLIST, SET_MANUAL) if _has_rule(name)]
+
+
+def test_entry_enforced(entry: str, active_sets=None) -> bool:
+    """True if *entry* (IP or CIDR) matches an ipset with an active DROP rule."""
+    if active_sets is None:
+        active_sets = get_active_block_sets()
+    for name in active_sets:
+        rc, _, _ = _run(['ipset', 'test', name, entry], check=False)
+        if rc == 0:
+            return True
+    return False
+
+
+def get_iptables_rules() -> list:
+    """Return all active iptables rules across all chains (iptables -S output)."""
+    rc, out, _ = _run(['iptables', '-S'], check=False)
     if rc != 0:
-        return {'available': False, 'entry_count': 0, 'set_name': name, 'error': 'ipset not available or set does not exist'}
-    lines = stdout.strip().split('\n')
-    members_line = next((l for l in lines if l.startswith('Number of entries')), '')
-    count = 0
-    if members_line:
-        try:
-            count = int(members_line.split(':')[1].strip())
-        except (IndexError, ValueError):
-            pass
-    return {'available': True, 'entry_count': count, 'set_name': name}
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+def get_ipset_status() -> dict:
+    status = {'available': False, 'sets': {}, 'iptables_rules': [],
+              'ipranger_rules_active': False}
+    rc, out, _ = _run(['ipset', 'list', '-t'], check=False)
+    if rc != 0:
+        return status
+    status['available'] = True
+    current_name = None
+    for line in out.splitlines():
+        if line.startswith('Name:'):
+            current_name = line.split(':', 1)[1].strip()
+            status['sets'][current_name] = {'name': current_name, 'entry_count': 0}
+        elif line.startswith('Number of entries:') and current_name:
+            try:
+                status['sets'][current_name]['entry_count'] = int(line.split(':')[1].strip())
+            except (ValueError, IndexError):
+                pass
+    status['iptables_rules'] = get_iptables_rules()
+    status['ipranger_rules_active'] = all(
+        _has_rule(name) for name in (SET_BLACKLIST, SET_MANUAL))
+    return status

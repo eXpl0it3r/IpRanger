@@ -1,0 +1,69 @@
+<div class="space-y-2">
+  <div class="flex flex-wrap items-center gap-1.5">
+    <span class="text-xs text-gray-500 font-medium">CIDRs:</span>
+    {% for s in cidr_states %}
+    <span class="px-1.5 py-0.5 rounded font-mono text-xs
+      {% if s.db_blocked and s.enforced %}bg-red-100 text-red-700
+      {% elif s.db_blocked %}bg-orange-100 text-orange-700
+      {% elif s.enforced %}bg-purple-100 text-purple-700
+      {% else %}bg-indigo-100 text-indigo-700{% endif %}"
+      title="{% if s.db_blocked and s.enforced %}Blocked (manual) and enforced in the kernel
+             {%- elif s.db_blocked %}Blocked in the DB but not enforced — sync the manual ipset on the Blocking page
+             {%- elif s.enforced %}Enforced via ipset (e.g. threat feed), not in manual blocks
+             {%- else %}Not blocked{% endif %}">
+      {{ s.cidr }}{% if s.blocked %} ⛔{% endif %}
+    </span>
+    {% else %}
+    <span class="text-xs text-gray-400 italic">none</span>
+    {% endfor %}
+  </div>
+  {% if cidr_states | selectattr('blocked') | list %}
+  <p class="text-[11px] text-gray-400">
+    <span class="text-red-600 font-medium">red</span> = blocked &amp; enforced ·
+    <span class="text-orange-600 font-medium">orange</span> = blocked in DB, not enforced ·
+    <span class="text-purple-600 font-medium">purple</span> = enforced by ipset only (e.g. threat feed) ·
+    <span class="text-indigo-600 font-medium">blue</span> = not blocked
+  </p>
+  {% endif %}
+  {% if ips %}
+  <table class="min-w-full text-xs divide-y divide-indigo-100">
+    <thead>
+      <tr class="text-indigo-600 font-semibold">
+        <th class="px-3 py-2 text-left">IP Address</th>
+        <th class="px-3 py-2 text-left">CIDR</th>
+        <th class="px-3 py-2 text-left">Last seen</th>
+        <th class="px-3 py-2 text-left">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-indigo-50">
+      {% for ip in ips %}
+      <tr class="hover:bg-white/60">
+        <td class="px-3 py-2 font-mono text-gray-800 font-medium">{{ ip.ip }}</td>
+        <td class="px-3 py-2 font-mono text-gray-500">{{ ip.cidr or '–' }}</td>
+        <td class="px-3 py-2 text-gray-400 whitespace-nowrap">
+          {{ ip.last_seen[:16].replace('T',' ') if ip.last_seen else '–' }}
+        </td>
+        <td class="px-3 py-2">
+          {% if ip.whitelisted %}
+          <span class="px-2 py-0.5 text-xs rounded border border-green-200 bg-green-50 text-green-700">
+            Whitelisted
+          </span>
+          {% else %}
+          <form hx-post="/api/block">
+            <input type="hidden" name="entry" value="{{ ip.ip }}" />
+            <input type="hidden" name="reason" value="Blocked from Networks page" />
+            <button type="submit"
+              class="px-2 py-0.5 text-xs rounded border border-red-200 text-red-600 hover:bg-red-50">
+              Block IP
+            </button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-sm text-gray-400 italic py-2">No live connections from this network right now.</p>
+  {% endif %}
+</div>

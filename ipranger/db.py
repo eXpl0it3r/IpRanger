@@ -1,7 +1,9 @@
+"""Database layer for IpRanger V2."""
 import sqlite3
 import logging
 from datetime import datetime
 from ipaddress import ip_address, ip_network, AddressValueError
+
 from flask import g
 
 from .config import config
@@ -9,28 +11,30 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 
+def _utc() -> str:
+    return datetime.utcnow().isoformat()
+
+
+# ── Connection management ─────────────────────────────────────────────────────
+
 def get_db():
-    """Get the database connection for the current application context."""
     if 'db' not in g:
-        db_path = config.get_db_path()
-        g.db = sqlite3.connect(db_path)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA foreign_keys=ON")
+        conn = sqlite3.connect(config.get_db_path())
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        g.db = conn
     return g.db
 
 
 def close_db(e=None):
-    """Close the database connection."""
     db = g.pop('db', None)
     if db is not None:
         db.close()
 
 
 def _get_direct_db():
-    """Get a direct (non-Flask-context) DB connection for use in background jobs."""
-    db_path = config.get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(config.get_db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -38,257 +42,234 @@ def _get_direct_db():
 
 
 def _db():
-    """Return DB connection from Flask context if available, else a direct connection."""
+    """Return (connection, owned). Background jobs get an owned direct connection."""
     try:
         return get_db(), False
     except RuntimeError:
         return _get_direct_db(), True
 
 
+# ── Schema ────────────────────────────────────────────────────────────────────
+
 def init_db():
-    """Create all tables."""
-    db_path = config.get_db_path()
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(config.get_db_path())
     conn.execute("PRAGMA journal_mode=WAL")
-    cur = conn.cursor()
-
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS ip_stats (
-            ip TEXT PRIMARY KEY,
-            connection_count INTEGER DEFAULT 0,
-            first_seen TEXT,
-            last_seen TEXT,
-            is_blocked INTEGER DEFAULT 0,
-            is_friendly INTEGER DEFAULT 0,
-            is_flagged INTEGER DEFAULT 0,
-            rdap_org TEXT,
-            rdap_network TEXT,
-            rdap_asn TEXT,
-            rdap_country TEXT,
-            rdap_looked_up INTEGER DEFAULT 0,
-            rdap_looked_up_at TEXT
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        -- Every unique peer IP ever seen (historic backlog)
+        CREATE TABLE IF NOT EXISTS seen_ips (
+            ip         TEXT PRIMARY KEY,
+            first_seen TEXT NOT NULL,
+            last_seen  TEXT NOT NULL,
+            hit_count  INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Live snapshot - replaced every monitor poll
+        CREATE TABLE IF NOT EXISTS live_connections (
+            conn_key    TEXT PRIMARY KEY,
+            ip          TEXT NOT NULL,
+            local_ip    TEXT,
+            local_port  TEXT,
+            remote_port TEXT,
+            state       TEXT,
+            process     TEXT,
+            first_seen  TEXT NOT NULL,
+            last_seen   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_live_ip ON live_connections(ip);
+
+        -- Cached CIDR/ASN ranges resolved via RDAP
+        CREATE TABLE IF NOT EXISTS asn_ranges (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            cidr         TEXT UNIQUE NOT NULL,
+            asn          TEXT,
+            network_name TEXT,
+            country_code TEXT,
+            info_url     TEXT,
+            looked_up_at TEXT NOT NULL
+        );
+
+        -- Per-IP mapping to its resolved ASN range
+        CREATE TABLE IF NOT EXISTS ip_asn_map (
+            ip           TEXT PRIMARY KEY,
+            asn_range_id INTEGER,
+            looked_up_at TEXT NOT NULL,
+            FOREIGN KEY(asn_range_id) REFERENCES asn_ranges(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ip_asn_range ON ip_asn_map(asn_range_id);
+
+        -- Manual blocks -> pushed to ipranger_manual ipset
+        CREATE TABLE IF NOT EXISTS manual_blocks (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry      TEXT UNIQUE NOT NULL,
+            entry_type TEXT NOT NULL,
+            reason     TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- Whitelist (IPs/CIDRs that must never be auto-blocked)
+        CREATE TABLE IF NOT EXISTS whitelist_entries (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry      TEXT UNIQUE NOT NULL,
+            entry_type TEXT NOT NULL,
+            label      TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        -- External blocklist feed sources
         CREATE TABLE IF NOT EXISTS blocklist_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            url TEXT NOT NULL,
-            entry_type TEXT NOT NULL,
+            name        TEXT PRIMARY KEY,
+            url         TEXT NOT NULL,
+            entry_type  TEXT NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
             last_updated TEXT,
-            entry_count INTEGER DEFAULT 0,
-            enabled INTEGER DEFAULT 1
+            entry_count INTEGER NOT NULL DEFAULT 0
         );
 
+        -- Blocklist feed entries -> pushed to ipranger_blacklist ipset
         CREATE TABLE IF NOT EXISTS blocklist_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry TEXT NOT NULL,
-            entry_type TEXT NOT NULL,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             source_name TEXT NOT NULL,
-            UNIQUE(entry, source_name)
+            entry       TEXT NOT NULL,
+            entry_type  TEXT NOT NULL,
+            UNIQUE(source_name, entry),
+            FOREIGN KEY(source_name) REFERENCES blocklist_sources(name) ON DELETE CASCADE
         );
-
-        CREATE TABLE IF NOT EXISTS friendly_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry TEXT UNIQUE NOT NULL,
-            entry_type TEXT NOT NULL,
-            label TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS blocked_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry TEXT UNIQUE NOT NULL,
-            entry_type TEXT NOT NULL,
-            reason TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
+        CREATE INDEX IF NOT EXISTS idx_bl_entry ON blocklist_entries(entry);
     """)
     conn.commit()
     conn.close()
     logger.info("Database initialized")
 
 
-def upsert_ip_connection(ip, local_port, remote_port, state, process, flag_threshold=500, increment=True):
-    """Insert or update ip_stats for a seen connection.
+# ── Live connection snapshot ──────────────────────────────────────────────────
 
-    When *increment* is True (default) the connection_count is incremented —
-    use this only for connections that are new since the last poll.
-    When False, only last_seen and is_friendly are updated, leaving the count
-    unchanged so long-lived connections aren't double-counted.
-    """
+def record_snapshot(connections: list) -> int:
+    """Replace live_connections with current snapshot; update seen_ips for new peers."""
     conn, owned = _db()
     try:
-        now = datetime.utcnow().isoformat()
+        now = _utc()
         cur = conn.cursor()
+        current_keys: set = set()
+        new_count = 0
 
-        # Check if IP is friendly
-        cur.execute("SELECT 1 FROM friendly_entries WHERE entry = ?", (ip,))
-        is_friendly = 1 if cur.fetchone() else 0
+        for item in connections:
+            key = (
+                f"{item['local_ip']}:{item['local_port']}"
+                f"->{item['peer_ip']}:{item['peer_port']}"
+            )
+            current_keys.add(key)
 
-        # Check if IP is in a friendly CIDR
-        if not is_friendly:
-            try:
-                ip_obj = ip_address(ip)
-                cur.execute("SELECT entry FROM friendly_entries WHERE entry_type = 'cidr'")
-                for row in cur.fetchall():
-                    try:
-                        if ip_obj in ip_network(row[0], strict=False):
-                            is_friendly = 1
-                            break
-                    except ValueError:
-                        pass
-            except (AddressValueError, ValueError):
-                pass
+            cur.execute("SELECT 1 FROM live_connections WHERE conn_key=?", (key,))
+            is_new = cur.fetchone() is None
 
-        if increment:
-            cur.execute("""
-                INSERT INTO ip_stats (ip, connection_count, first_seen, last_seen, is_friendly)
-                VALUES (?, 1, ?, ?, ?)
-                ON CONFLICT(ip) DO UPDATE SET
-                    connection_count = connection_count + 1,
-                    last_seen = excluded.last_seen,
-                    is_friendly = CASE WHEN excluded.is_friendly = 1 THEN 1 ELSE is_friendly END
-            """, (ip, now, now, is_friendly))
+            if is_new:
+                new_count += 1
+                cur.execute("""
+                    INSERT INTO seen_ips (ip, first_seen, last_seen, hit_count)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(ip) DO UPDATE SET
+                        last_seen = excluded.last_seen,
+                        hit_count = hit_count + 1
+                """, (item['peer_ip'], now, now))
+                cur.execute("""
+                    INSERT INTO live_connections
+                        (conn_key, ip, local_ip, local_port, remote_port,
+                         state, process, first_seen, last_seen)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (key, item['peer_ip'], item['local_ip'], item['local_port'],
+                      item['peer_port'], item['state'], item['process'], now, now))
+            else:
+                cur.execute(
+                    "UPDATE live_connections SET state=?,process=?,last_seen=? WHERE conn_key=?",
+                    (item['state'], item['process'], now, key))
+                cur.execute(
+                    "UPDATE seen_ips SET last_seen=? WHERE ip=?",
+                    (now, item['peer_ip']))
+
+        if current_keys:
+            placeholders = ",".join("?" * len(current_keys))
+            cur.execute(
+                f"DELETE FROM live_connections WHERE conn_key NOT IN ({placeholders})",
+                tuple(current_keys))
         else:
-            # Ongoing connection: just refresh last_seen and is_friendly
-            cur.execute("""
-                INSERT INTO ip_stats (ip, connection_count, first_seen, last_seen, is_friendly)
-                VALUES (?, 0, ?, ?, ?)
-                ON CONFLICT(ip) DO UPDATE SET
-                    last_seen = excluded.last_seen,
-                    is_friendly = CASE WHEN excluded.is_friendly = 1 THEN 1 ELSE is_friendly END
-            """, (ip, now, now, is_friendly))
-
-        # Check flag threshold (only relevant when incrementing)
-        if increment:
-            cur.execute("SELECT connection_count FROM ip_stats WHERE ip = ?", (ip,))
-            row = cur.fetchone()
-            if row and row[0] >= flag_threshold and not is_friendly:
-                cur.execute("UPDATE ip_stats SET is_flagged = 1 WHERE ip = ?", (ip,))
+            cur.execute("DELETE FROM live_connections")
 
         conn.commit()
-    except Exception as e:
-        logger.error(f"upsert_ip_connection failed for {ip}: {e}")
+        logger.debug(f"Snapshot: {len(connections)} open, {new_count} new")
+        return new_count
+    except Exception as exc:
         conn.rollback()
+        logger.error(f"record_snapshot failed: {exc}")
+        return 0
     finally:
         if owned:
             conn.close()
 
 
-def get_ip_stats(page=1, per_page=50, sort='connection_count', search=None):
-    """Return paginated IP statistics."""
-    allowed_sorts = {
-        'connection_count', 'ip', 'first_seen', 'last_seen',
-        'rdap_org', 'rdap_country', 'rdap_asn',
-    }
-    if sort not in allowed_sorts:
-        sort = 'connection_count'
-
+def get_live_connection_count() -> int:
     conn, owned = _db()
     try:
         cur = conn.cursor()
-        params = []
-        where = ""
-        if search:
-            where = "WHERE ip LIKE ? OR rdap_org LIKE ? OR rdap_country LIKE ? OR rdap_asn LIKE ?"
-            like = f"%{search}%"
-            params = [like, like, like, like]
-
-        count_sql = f"SELECT COUNT(*) FROM ip_stats {where}"
-        cur.execute(count_sql, params)
-        total = cur.fetchone()[0]
-
-        offset = (page - 1) * per_page
-        sql = f"""
-            SELECT * FROM ip_stats {where}
-            ORDER BY {sort} DESC
-            LIMIT ? OFFSET ?
-        """
-        cur.execute(sql, params + [per_page, offset])
-        rows = [dict(r) for r in cur.fetchall()]
-        return rows, total
+        cur.execute("SELECT COUNT(*) FROM live_connections")
+        return cur.fetchone()[0]
     finally:
         if owned:
             conn.close()
 
 
-def get_ip_detail(ip):
-    """Return single IP detail dict or None."""
+def get_historic_ip_count() -> int:
     conn, owned = _db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM ip_stats WHERE ip = ?", (ip,))
-        row = cur.fetchone()
-        return dict(row) if row else None
+        cur.execute("SELECT COUNT(*) FROM seen_ips")
+        return cur.fetchone()[0]
     finally:
         if owned:
             conn.close()
 
 
-def get_overview_stats():
-    """Return dict with aggregate stats."""
-    from .monitor import get_live_connection_count
-    conn, owned = _db()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM ip_stats")
-        total_ips = cur.fetchone()[0]
+# ── Live view queries ─────────────────────────────────────────────────────────
 
-        cur.execute("SELECT COALESCE(SUM(connection_count), 0) FROM ip_stats")
-        total_connections = cur.fetchone()[0]
-
-        cur.execute("SELECT COUNT(*) FROM ip_stats WHERE is_blocked = 1")
-        blocked_count = cur.fetchone()[0]
-
-        cur.execute("SELECT COUNT(*) FROM ip_stats WHERE is_flagged = 1 AND is_blocked = 0")
-        flagged_count = cur.fetchone()[0]
-
-        cur.execute("SELECT COUNT(*) FROM blocklist_entries")
-        blocklist_entries_count = cur.fetchone()[0]
-
-        cur.execute("SELECT COUNT(*) FROM friendly_entries")
-        friendly_count = cur.fetchone()[0]
-
-        return {
-            'total_ips': total_ips,
-            'total_connections': total_connections,
-            'blocked_count': blocked_count,
-            'flagged_count': flagged_count,
-            'blocklist_entries_count': blocklist_entries_count,
-            'friendly_count': friendly_count,
-            'live_connections': get_live_connection_count(),
-        }
-    finally:
-        if owned:
-            conn.close()
-
-
-def update_rdap(ip, org, network, asn, country):
-    """Update RDAP fields for an IP."""
-    conn, owned = _db()
-    try:
-        now = datetime.utcnow().isoformat()
-        conn.execute("""
-            UPDATE ip_stats
-            SET rdap_org=?, rdap_network=?, rdap_asn=?, rdap_country=?,
-                rdap_looked_up=1, rdap_looked_up_at=?
-            WHERE ip=?
-        """, (org, network, asn, country, now, ip))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def get_ips_needing_rdap(limit=10):
-    """Return list of IPs that have not had RDAP lookup yet."""
+def get_live_ips_with_asn() -> list:
+    """Currently connected unique IPs enriched with ASN, sorted by IP."""
     conn, owned = _db()
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT ip FROM ip_stats
-            WHERE rdap_looked_up = 0
-            ORDER BY connection_count DESC
+            SELECT
+                l.ip,
+                COUNT(l.conn_key)       AS active_connections,
+                MAX(l.last_seen)        AS last_seen,
+                r.asn,
+                r.network_name,
+                r.country_code,
+                r.info_url,
+                r.cidr,
+                CASE WHEN m.ip IS NOT NULL THEN 1 ELSE 0 END AS asn_resolved
+            FROM live_connections l
+            LEFT JOIN ip_asn_map  m ON m.ip = l.ip
+            LEFT JOIN asn_ranges  r ON r.id = m.asn_range_id
+            GROUP BY l.ip
+            ORDER BY l.ip
+        """)
+        return [dict(row) for row in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+# ── ASN / CIDR range cache ────────────────────────────────────────────────────
+
+def get_ips_missing_asn(limit: int = 50) -> list:
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT s.ip FROM seen_ips s
+            LEFT JOIN ip_asn_map m ON m.ip = s.ip
+            WHERE m.ip IS NULL
+            ORDER BY s.last_seen DESC
             LIMIT ?
         """, (limit,))
         return [row[0] for row in cur.fetchall()]
@@ -297,8 +278,331 @@ def get_ips_needing_rdap(limit=10):
             conn.close()
 
 
-def get_blocklist_sources():
-    """Return list of all blocklist sources."""
+def get_all_asn_ranges() -> list:
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM asn_ranges ORDER BY network_name, cidr")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def find_cached_range_for_ip(ip: str):
+    """Check if ip falls inside any already-cached CIDR; return that range dict or None."""
+    try:
+        ip_obj = ip_address(ip)
+    except ValueError:
+        return None
+    for row in get_all_asn_ranges():
+        try:
+            if ip_obj in ip_network(row['cidr'], strict=False):
+                return row
+        except ValueError:
+            continue
+    return None
+
+
+def upsert_asn_range(cidr: str, asn: str, network_name: str,
+                     country_code: str, info_url: str) -> int:
+    """Insert or refresh an ASN range; return its id."""
+    conn, owned = _db()
+    try:
+        now = _utc()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO asn_ranges (cidr, asn, network_name, country_code, info_url, looked_up_at)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(cidr) DO UPDATE SET
+                asn          = excluded.asn,
+                network_name = excluded.network_name,
+                country_code = excluded.country_code,
+                info_url     = excluded.info_url,
+                looked_up_at = excluded.looked_up_at
+        """, (cidr, asn, network_name, country_code, info_url, now))
+        cur.execute("SELECT id FROM asn_ranges WHERE cidr=?", (cidr,))
+        range_id = cur.fetchone()[0]
+        conn.commit()
+        return range_id
+    finally:
+        if owned:
+            conn.close()
+
+
+def record_ip_asn(ip: str, asn_range_id):
+    """Link an IP to its resolved ASN range (None = looked up but no range found)."""
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            INSERT INTO ip_asn_map (ip, asn_range_id, looked_up_at)
+            VALUES (?,?,?)
+            ON CONFLICT(ip) DO UPDATE SET
+                asn_range_id = excluded.asn_range_id,
+                looked_up_at = excluded.looked_up_at
+        """, (ip, asn_range_id, _utc()))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+# ── Network group view ────────────────────────────────────────────────────────
+
+def get_network_groups() -> list:
+    """ASN groups ordered by live IP count descending."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                COALESCE(r.network_name, 'Unknown') AS network_name,
+                COALESCE(r.asn, '')                 AS asn,
+                COALESCE(r.country_code, '')        AS country_code,
+                MIN(r.info_url)                     AS info_url,
+                COUNT(DISTINCT r.cidr)              AS range_count,
+                COUNT(DISTINCT m.ip)                AS historic_ip_count,
+                COUNT(DISTINCT l.ip)                AS live_ip_count
+            FROM ip_asn_map m
+            JOIN  asn_ranges r      ON r.id = m.asn_range_id
+            LEFT JOIN seen_ips s    ON s.ip  = m.ip
+            LEFT JOIN live_connections l ON l.ip = m.ip
+            GROUP BY COALESCE(r.network_name,'Unknown'),
+                     COALESCE(r.asn,''),
+                     COALESCE(r.country_code,'')
+            ORDER BY live_ip_count DESC, historic_ip_count DESC, network_name
+        """)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_live_ips_for_group(network_name: str, asn: str) -> list:
+    """Currently connected IPs for a specific ASN group, sorted by IP."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT l.ip, r.cidr, MAX(l.last_seen) AS last_seen
+            FROM live_connections l
+            JOIN  ip_asn_map m  ON m.ip = l.ip
+            JOIN  asn_ranges r  ON r.id = m.asn_range_id
+            WHERE COALESCE(r.network_name,'Unknown') = ?
+              AND COALESCE(r.asn,'') = ?
+            GROUP BY l.ip, r.cidr
+            ORDER BY l.ip
+        """, (network_name, asn))
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_cidrs_for_group(network_name: str, asn: str) -> list:
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT r.cidr FROM asn_ranges r
+            WHERE COALESCE(r.network_name,'Unknown')=?
+              AND COALESCE(r.asn,'')=?
+            ORDER BY r.cidr
+        """, (network_name, asn))
+        return [row[0] for row in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_ips_for_group(network_name: str, asn: str) -> list:
+    """All IPs (historic) mapped to any range of an ASN group."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT m.ip FROM ip_asn_map m
+            JOIN asn_ranges r ON r.id = m.asn_range_id
+            WHERE COALESCE(r.network_name,'Unknown')=?
+              AND COALESCE(r.asn,'')=?
+            ORDER BY m.ip
+        """, (network_name, asn))
+        return [row[0] for row in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def rename_network_group(network_name: str, asn: str, new_name: str) -> int:
+    """Rename all ranges of an ASN group; return number of updated ranges."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE asn_ranges SET network_name=?
+            WHERE COALESCE(network_name,'Unknown')=?
+              AND COALESCE(asn,'')=?
+        """, (new_name, network_name, asn))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        if owned:
+            conn.close()
+
+
+def clear_asn_group(network_name: str, asn: str):
+    """Drop an ASN group's cached ranges and IP mappings so they can be re-resolved."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            DELETE FROM ip_asn_map WHERE asn_range_id IN (
+                SELECT id FROM asn_ranges
+                WHERE COALESCE(network_name,'Unknown')=?
+                  AND COALESCE(asn,'')=?
+            )
+        """, (network_name, asn))
+        cur.execute("""
+            DELETE FROM asn_ranges
+            WHERE COALESCE(network_name,'Unknown')=?
+              AND COALESCE(asn,'')=?
+        """, (network_name, asn))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+# ── Manual blocks ─────────────────────────────────────────────────────────────
+
+def get_manual_blocks() -> list:
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM manual_blocks ORDER BY created_at DESC")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def add_manual_block(entry: str, reason: str = ""):
+    entry_type = "cidr" if "/" in entry else "ip"
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO manual_blocks (entry, entry_type, reason, created_at)
+            VALUES (?,?,?,?)
+        """, (entry, entry_type, reason, _utc()))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+def remove_manual_block(entry: str):
+    conn, owned = _db()
+    try:
+        conn.execute("DELETE FROM manual_blocks WHERE entry=?", (entry,))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+# ── Whitelist ─────────────────────────────────────────────────────────────────
+
+def get_whitelist_entries() -> list:
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM whitelist_entries ORDER BY entry")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        if owned:
+            conn.close()
+
+
+def add_whitelist_entry(entry: str, label: str = ""):
+    entry_type = "cidr" if "/" in entry else "ip"
+    conn, owned = _db()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO whitelist_entries (entry, entry_type, label, created_at)
+            VALUES (?,?,?,?)
+        """, (entry, entry_type, label, _utc()))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+def remove_whitelist_entry(entry: str):
+    conn, owned = _db()
+    try:
+        conn.execute("DELETE FROM whitelist_entries WHERE entry=?", (entry,))
+        conn.commit()
+    finally:
+        if owned:
+            conn.close()
+
+
+def is_whitelisted(entry: str) -> bool:
+    """True if *entry* (IP or CIDR) is covered by the whitelist."""
+    conn, owned = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM whitelist_entries WHERE entry=?", (entry,))
+        if cur.fetchone():
+            return True
+        try:
+            ip_obj = ip_address(entry)
+        except (AddressValueError, ValueError):
+            return False
+        cur.execute("SELECT entry FROM whitelist_entries WHERE entry_type='cidr'")
+        for row in cur.fetchall():
+            try:
+                if ip_obj in ip_network(row[0], strict=False):
+                    return True
+            except ValueError:
+                continue
+        return False
+    finally:
+        if owned:
+            conn.close()
+
+
+def get_whitelist_checker():
+    """Return an ip -> bool callable backed by a single whitelist snapshot.
+
+    Use this to annotate lists of IPs without one DB round-trip per IP.
+    """
+    entries = get_whitelist_entries()
+    exact = {e['entry'] for e in entries}
+    networks = []
+    for e in entries:
+        if e['entry_type'] == 'cidr':
+            try:
+                networks.append(ip_network(e['entry'], strict=False))
+            except ValueError:
+                continue
+
+    def check(ip: str) -> bool:
+        if ip in exact:
+            return True
+        try:
+            ip_obj = ip_address(ip)
+        except (AddressValueError, ValueError):
+            return False
+        return any(ip_obj in net for net in networks)
+
+    return check
+
+
+# ── Blocklist sources / entries ───────────────────────────────────────────────
+
+def get_blocklist_sources() -> list:
     conn, owned = _db()
     try:
         cur = conn.cursor()
@@ -309,411 +613,103 @@ def get_blocklist_sources():
             conn.close()
 
 
-def upsert_blocklist_source(name, url, entry_type, enabled=1):
-    """Add or update a blocklist source record.
-
-    When *enabled* is None the existing enabled value in the DB is preserved
-    (used during restart seeding so UI toggles are not overwritten).
-    """
+def seed_blocklist_source(name: str, url: str, entry_type: str, enabled: int = 1):
     conn, owned = _db()
     try:
-        if enabled is None:
-            # Update url and type only; leave enabled untouched
-            conn.execute("""
-                INSERT INTO blocklist_sources (name, url, entry_type, enabled)
-                VALUES (?, ?, ?, 1)
-                ON CONFLICT(name) DO UPDATE SET
-                    url=excluded.url,
-                    entry_type=excluded.entry_type
-            """, (name, url, entry_type))
-        else:
-            conn.execute("""
-                INSERT INTO blocklist_sources (name, url, entry_type, enabled)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    url=excluded.url,
-                    entry_type=excluded.entry_type,
-                    enabled=excluded.enabled
-            """, (name, url, entry_type, int(enabled)))
+        conn.execute("""
+            INSERT INTO blocklist_sources (name, url, entry_type, enabled)
+            VALUES (?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                url=excluded.url, entry_type=excluded.entry_type
+        """, (name, url, entry_type, enabled))
         conn.commit()
     finally:
         if owned:
             conn.close()
 
 
-def update_blocklist_entries(source_name, entries):
-    """Replace all entries for a source with the new list."""
+def replace_blocklist_entries(source_name: str, entries: list):
+    """Replace all entries for a source atomically. entries = list of (entry, type) tuples."""
     conn, owned = _db()
     try:
-        now = datetime.utcnow().isoformat()
-        conn.execute("DELETE FROM blocklist_entries WHERE source_name = ?", (source_name,))
+        conn.execute("DELETE FROM blocklist_entries WHERE source_name=?", (source_name,))
         conn.executemany(
-            "INSERT OR IGNORE INTO blocklist_entries (entry, entry_type, source_name) VALUES (?, ?, ?)",
-            [(e, t, source_name) for e, t in entries]
+            "INSERT OR IGNORE INTO blocklist_entries (source_name, entry, entry_type)"
+            " VALUES (?,?,?)",
+            [(source_name, e, t) for e, t in entries],
         )
-        conn.execute("""
-            UPDATE blocklist_sources
-            SET last_updated=?, entry_count=?
-            WHERE name=?
-        """, (now, len(entries), source_name))
+        conn.execute(
+            "UPDATE blocklist_sources SET last_updated=?, entry_count=? WHERE name=?",
+            (_utc(), len(entries), source_name))
         conn.commit()
-    except Exception as e:
-        logger.error(f"update_blocklist_entries failed for {source_name}: {e}")
+        logger.info(f"Blocklist {source_name}: {len(entries)} entries stored")
+    except Exception as exc:
         conn.rollback()
+        logger.error(f"replace_blocklist_entries failed for {source_name}: {exc}")
     finally:
         if owned:
             conn.close()
 
 
-def get_blocklist_entries(source_name=None, page=1, per_page=50):
-    """Return paginated blocklist entries."""
-    conn, owned = _db()
-    try:
-        cur = conn.cursor()
-        params = []
-        where = ""
-        if source_name:
-            where = "WHERE source_name = ?"
-            params = [source_name]
-
-        cur.execute(f"SELECT COUNT(*) FROM blocklist_entries {where}", params)
-        total = cur.fetchone()[0]
-
-        offset = (page - 1) * per_page
-        cur.execute(
-            f"SELECT * FROM blocklist_entries {where} ORDER BY entry LIMIT ? OFFSET ?",
-            params + [per_page, offset]
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-        return rows, total
-    finally:
-        if owned:
-            conn.close()
-
-
-def is_ip_in_blocklist(ip):
-    """Check if an IP or any of its CIDR ranges is in the blocklist."""
-    conn, owned = _db()
-    try:
-        cur = conn.cursor()
-        # Direct IP match
-        cur.execute("SELECT 1 FROM blocklist_entries WHERE entry = ? AND entry_type = 'ip'", (ip,))
-        if cur.fetchone():
-            return True
-
-        # CIDR match
-        try:
-            ip_obj = ip_address(ip)
-            cur.execute("SELECT entry FROM blocklist_entries WHERE entry_type = 'cidr'")
-            for row in cur.fetchall():
-                try:
-                    if ip_obj in ip_network(row[0], strict=False):
-                        return True
-                except ValueError:
-                    pass
-        except (AddressValueError, ValueError):
-            pass
-        return False
-    finally:
-        if owned:
-            conn.close()
-
-
-def block_ip(ip, reason=''):
-    """Add IP to blocked_entries and mark ip_stats."""
-    conn, owned = _db()
-    try:
-        entry_type = 'cidr' if '/' in ip else 'ip'
-        conn.execute("""
-            INSERT OR IGNORE INTO blocked_entries (entry, entry_type, reason)
-            VALUES (?, ?, ?)
-        """, (ip, entry_type, reason))
-        conn.execute("UPDATE ip_stats SET is_blocked = 1 WHERE ip = ?", (ip,))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def unblock_ip(ip):
-    """Remove IP from blocked_entries and clear ip_stats flag."""
-    conn, owned = _db()
-    try:
-        conn.execute("DELETE FROM blocked_entries WHERE entry = ?", (ip,))
-        conn.execute("UPDATE ip_stats SET is_blocked = 0 WHERE ip = ?", (ip,))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def add_friendly(entry, label='', entry_type=None):
-    """Add an IP or CIDR to friendly_entries."""
-    conn, owned = _db()
-    try:
-        if entry_type is None:
-            entry_type = 'cidr' if '/' in entry else 'ip'
-        conn.execute("""
-            INSERT OR IGNORE INTO friendly_entries (entry, entry_type, label)
-            VALUES (?, ?, ?)
-        """, (entry, entry_type, label))
-        # Mark in ip_stats if it's a plain IP
-        if entry_type == 'ip':
-            conn.execute("UPDATE ip_stats SET is_friendly = 1 WHERE ip = ?", (entry,))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def remove_friendly(entry):
-    """Remove from friendly_entries."""
-    conn, owned = _db()
-    try:
-        conn.execute("DELETE FROM friendly_entries WHERE entry = ?", (entry,))
-        conn.execute("UPDATE ip_stats SET is_friendly = 0 WHERE ip = ?", (entry,))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def get_friendly_entries():
-    """Return list of all friendly entries."""
-    conn, owned = _db()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM friendly_entries ORDER BY entry")
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        if owned:
-            conn.close()
-
-
-def get_blocked_entries(page=1, per_page=50):
-    """Return paginated blocked entries."""
-    conn, owned = _db()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM blocked_entries")
-        total = cur.fetchone()[0]
-
-        offset = (page - 1) * per_page
-        cur.execute(
-            "SELECT * FROM blocked_entries ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (per_page, offset)
-        )
-        rows = [dict(r) for r in cur.fetchall()]
-        return rows, total
-    finally:
-        if owned:
-            conn.close()
-
-
-def mark_flagged(ip):
-    """Set is_flagged=1 for an IP."""
-    conn, owned = _db()
-    try:
-        conn.execute("UPDATE ip_stats SET is_flagged = 1 WHERE ip = ?", (ip,))
-        conn.commit()
-    finally:
-        if owned:
-            conn.close()
-
-
-def clear_ip_history():
-    """Reset connection history in ip_stats while retaining RDAP data.
-
-    Resets connection_count, first_seen, last_seen, and is_flagged to their
-    zero/null state. RDAP fields are kept so the next connections for those IPs
-    are immediately enriched without a new lookup.
-    """
-    conn, owned = _db()
-    try:
-        conn.execute("""
-            UPDATE ip_stats SET
-                connection_count = 0,
-                first_seen       = NULL,
-                last_seen        = NULL,
-                is_flagged       = 0
-        """)
-        conn.commit()
-        logger.info("IP connection history cleared (RDAP data retained)")
-    except Exception as e:
-        logger.error(f"clear_ip_history failed: {e}")
-        conn.rollback()
-    finally:
-        if owned:
-            conn.close()
-
-
-def clear_ip_history():
-    """Reset connection history for all IPs while preserving RDAP data.
-
-    Resets: connection_count, first_seen, last_seen, is_flagged, is_blocked.
-    Preserves: rdap_org, rdap_network, rdap_asn, rdap_country, rdap_looked_up,
-               rdap_looked_up_at, is_friendly.
-    Also clears the blocked_entries table since block state is tied to history.
-    """
-    conn, owned = _db()
-    try:
-        conn.execute("""
-            UPDATE ip_stats SET
-                connection_count = 0,
-                first_seen       = NULL,
-                last_seen        = NULL,
-                is_flagged       = 0,
-                is_blocked       = 0
-        """)
-        conn.execute("DELETE FROM blocked_entries")
-        conn.commit()
-        logger.info("IP connection history cleared (RDAP data retained)")
-    except Exception as e:
-        logger.error(f"clear_ip_history failed: {e}")
-        conn.rollback()
-    finally:
-        if owned:
-            conn.close()
-
-
-def get_top_ips(limit=10):
-    """Return top IPs by connection count."""
+def get_all_blocklist_entries_for_ipset() -> list:
+    """All (entry, entry_type) pairs from enabled sources suitable for ipset."""
     conn, owned = _db()
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT * FROM ip_stats
-            ORDER BY connection_count DESC
-            LIMIT ?
-        """, (limit,))
-        return [dict(r) for r in cur.fetchall()]
+            SELECT DISTINCT e.entry, e.entry_type
+            FROM blocklist_entries e
+            JOIN  blocklist_sources s ON s.name = e.source_name
+            WHERE s.enabled=1 AND e.entry_type IN ('ip','cidr')
+        """)
+        return [(row[0], row[1]) for row in cur.fetchall()]
     finally:
         if owned:
             conn.close()
 
 
-def get_network_stats(page=1, per_page=50, search=None):
-    """Return paginated discovered networks grouped by rdap_network.
-
-    Each row contains aggregate data for all IPs belonging to that network.
-    IPs whose RDAP has not been resolved yet are excluded.
-    """
+def get_blocklist_entries_page(source_name=None, page: int = 1, per_page: int = 50):
     conn, owned = _db()
     try:
         cur = conn.cursor()
-
-        where_parts = ["rdap_looked_up = 1", "rdap_network IS NOT NULL", "rdap_network != ''"]
-        params: list = []
-        if search:
-            like = f"%{search}%"
-            where_parts.append(
-                "(rdap_network LIKE ? OR rdap_org LIKE ? OR rdap_asn LIKE ? OR rdap_country LIKE ?)"
-            )
-            params.extend([like, like, like, like])
-
-        where = "WHERE " + " AND ".join(where_parts)
-
-        cur.execute(
-            f"SELECT COUNT(DISTINCT rdap_network) FROM ip_stats {where}", params
-        )
+        where = "WHERE e.source_name=?" if source_name else ""
+        params = [source_name] if source_name else []
+        cur.execute(f"SELECT COUNT(*) FROM blocklist_entries e {where}", params)
         total = cur.fetchone()[0]
-
         offset = (page - 1) * per_page
-        cur.execute(f"""
-            SELECT
-                rdap_network                        AS network,
-                rdap_org                            AS org,
-                rdap_asn                            AS asn,
-                rdap_country                        AS country,
-                COUNT(ip)                           AS ip_count,
-                SUM(connection_count)               AS total_connections,
-                SUM(is_blocked)                     AS blocked_count,
-                SUM(CASE WHEN is_flagged=1 AND is_blocked=0 THEN 1 ELSE 0 END) AS flagged_count,
-                SUM(is_friendly)                    AS friendly_count,
-                MAX(last_seen)                      AS last_seen,
-                EXISTS(
-                    SELECT 1 FROM blocked_entries
-                    WHERE entry = rdap_network AND entry_type = 'cidr'
-                )                                   AS network_blocked
-            FROM ip_stats
-            {where}
-            GROUP BY rdap_network
-            ORDER BY ip_count DESC, total_connections DESC
-            LIMIT ? OFFSET ?
-        """, params + [per_page, offset])
-        rows = [dict(r) for r in cur.fetchall()]
-        return rows, total
+        cur.execute(
+            f"SELECT e.* FROM blocklist_entries e {where}"
+            f" ORDER BY e.entry LIMIT ? OFFSET ?",
+            params + [per_page, offset])
+        return [dict(r) for r in cur.fetchall()], total
     finally:
         if owned:
             conn.close()
 
 
-def get_ips_for_network(network):
-    """Return all IPs that belong to the given rdap_network."""
+# ── Overview stats ────────────────────────────────────────────────────────────
+
+def get_overview_stats() -> dict:
     conn, owned = _db()
     try:
         cur = conn.cursor()
-        cur.execute("""
-            SELECT ip, connection_count, first_seen, last_seen,
-                   is_blocked, is_flagged, is_friendly,
-                   rdap_org, rdap_asn, rdap_country
-            FROM ip_stats
-            WHERE rdap_network = ?
-            ORDER BY connection_count DESC
-        """, (network,))
-        return [dict(r) for r in cur.fetchall()]
-    finally:
-        if owned:
-            conn.close()
-
-
-def block_network(network, reason=''):
-    """Block a network CIDR range.
-
-    Inserts the CIDR into blocked_entries and marks all known IPs that belong
-    to this rdap_network as blocked in ip_stats.
-    """
-    conn, owned = _db()
-    try:
-        conn.execute("""
-            INSERT OR IGNORE INTO blocked_entries (entry, entry_type, reason)
-            VALUES (?, 'cidr', ?)
-        """, (network, reason))
-        conn.execute("""
-            UPDATE ip_stats SET is_blocked = 1
-            WHERE rdap_network = ?
-        """, (network,))
-        conn.commit()
-        logger.info(f"Blocked network {network}")
-    except Exception as e:
-        logger.error(f"block_network failed for {network}: {e}")
-        conn.rollback()
-    finally:
-        if owned:
-            conn.close()
-
-
-def unblock_network(network):
-    """Unblock a network CIDR range.
-
-    Removes the CIDR from blocked_entries and clears the blocked flag on all
-    IPs that belong to this rdap_network (unless they were individually blocked
-    by another entry too).
-    """
-    conn, owned = _db()
-    try:
-        conn.execute("DELETE FROM blocked_entries WHERE entry = ?", (network,))
-        # Only clear is_blocked on IPs that have no individual block entry
-        conn.execute("""
-            UPDATE ip_stats SET is_blocked = 0
-            WHERE rdap_network = ?
-              AND ip NOT IN (SELECT entry FROM blocked_entries WHERE entry_type = 'ip')
-        """, (network,))
-        conn.commit()
-        logger.info(f"Unblocked network {network}")
-    except Exception as e:
-        logger.error(f"unblock_network failed for {network}: {e}")
-        conn.rollback()
+        cur.execute("SELECT COUNT(*) FROM seen_ips"); historic_ips = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(DISTINCT ip) FROM live_connections"); live_ips = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM live_connections"); live_conns = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM manual_blocks"); manual_blocks = cur.fetchone()[0]
+        cur.execute("SELECT COALESCE(SUM(entry_count),0) FROM blocklist_sources WHERE enabled=1")
+        bl_entries = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM whitelist_entries"); whitelist = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM asn_ranges"); asn_ranges = cur.fetchone()[0]
+        return {
+            'historic_ips': historic_ips,
+            'live_ips': live_ips,
+            'live_conns': live_conns,
+            'manual_blocks': manual_blocks,
+            'bl_entries': bl_entries,
+            'whitelist': whitelist,
+            'asn_ranges': asn_ranges,
+        }
     finally:
         if owned:
             conn.close()

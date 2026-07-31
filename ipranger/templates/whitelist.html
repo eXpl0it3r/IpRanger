@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Whitelist – IpRanger{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900">Whitelist</h1>
+    <p class="text-sm text-gray-500 mt-0.5">IPs and CIDR ranges that should never be blocked. RFC-private ranges are pre-seeded.</p>
+  </div>
+
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+    <h2 class="text-sm font-semibold text-gray-700 mb-3">Add Entry</h2>
+    <form class="flex flex-col sm:flex-row gap-3"
+          hx-post="/api/whitelist/add"
+          hx-target="#whitelist-table-wrap"
+          hx-swap="innerHTML">
+      <input type="text" name="entry" placeholder="IP or CIDR (e.g. 10.0.0.1 or 192.168.0.0/24)"
+        class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+        required />
+      <input type="text" name="label" placeholder="Label (optional)"
+        class="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500" />
+      <button type="submit"
+        class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors">
+        Add
+      </button>
+    </form>
+  </div>
+
+  <div id="whitelist-table-wrap">
+    {% include "partials/whitelist_table.html" %}
+  </div>
+
+</div>
+{% endblock %}

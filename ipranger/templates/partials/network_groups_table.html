@@ -1,0 +1,131 @@
+<div id="network-groups-wrap">
+{% if groups %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+  <table class="min-w-full divide-y divide-gray-200 text-sm">
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="w-8 px-4 py-3"></th>
+        <th class="px-4 py-3 text-left font-semibold text-gray-600">Network Name</th>
+        <th class="px-4 py-3 text-left font-semibold text-gray-600">ASN</th>
+        <th class="px-4 py-3 text-left font-semibold text-gray-600">Country</th>
+        <th class="px-4 py-3 text-right font-semibold text-gray-600">CIDRs</th>
+        <th class="px-4 py-3 text-right font-semibold text-gray-600">Historic IPs</th>
+        <th class="px-4 py-3 text-right font-semibold text-gray-600 bg-teal-50">Live IPs</th>
+        <th class="px-4 py-3 text-left font-semibold text-gray-600">Blocked</th>
+        <th class="px-4 py-3 text-left font-semibold text-gray-600">Actions</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100" id="groups-tbody">
+      {% for g in groups %}
+      {% set slug = loop.index %}
+      <tr class="hover:bg-gray-50 cursor-pointer" onclick="toggleGroup({{ slug }})">
+        <td class="px-4 py-3 text-gray-400">
+          <svg id="chev-{{ slug }}" class="w-4 h-4 transition-transform duration-200"
+               fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+          </svg>
+        </td>
+        <td class="px-4 py-3 font-medium text-gray-800 max-w-xs truncate">
+          {% if g.asn %}
+            <a href="https://search.arin.net/rdap/?query=AS{{ g.asn }}" target="_blank"
+               class="hover:text-indigo-600 hover:underline"
+               onclick="event.stopPropagation()">{{ g.network_name }}</a>
+          {% elif g.info_url %}
+            <a href="{{ g.info_url }}" target="_blank"
+               class="hover:text-indigo-600 hover:underline"
+               onclick="event.stopPropagation()">{{ g.network_name }}</a>
+          {% else %}{{ g.network_name }}{% endif %}
+        </td>
+        <td class="px-4 py-3 font-mono text-xs text-gray-600">
+          {% if g.asn %}AS{{ g.asn }}{% else %}–{% endif %}
+        </td>
+        <td class="px-4 py-3 font-medium text-sm text-gray-700">{{ g.country_code or '–' }}</td>
+        <td class="px-4 py-3 text-right text-gray-600">{{ g.range_count }}</td>
+        <td class="px-4 py-3 text-right text-gray-600">{{ g.historic_ip_count }}</td>
+        <td class="px-4 py-3 text-right font-bold {% if g.live_ip_count > 0 %}text-teal-600{% else %}text-gray-400{% endif %} bg-teal-50/30">
+          {{ g.live_ip_count }}
+        </td>
+        <td class="px-4 py-3 whitespace-nowrap">
+          {% if g.block_status == 'full' %}
+            {% if g.enforced_count == g.total_cidrs %}
+            <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700"
+                  title="All {{ g.total_cidrs }} CIDR(s) blocked and enforced by ipset/iptables">
+              Blocked
+            </span>
+            {% else %}
+            <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700"
+                  title="All {{ g.total_cidrs }} CIDR(s) blocked in the DB, but only {{ g.enforced_count }} enforced in the kernel — sync the ipsets on the Blocking page">
+              Blocked · not enforced
+            </span>
+            {% endif %}
+          {% elif g.block_status == 'partial' %}
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700"
+                title="{{ g.blocked_count }} of {{ g.total_cidrs }} CIDR(s) blocked ({{ g.enforced_count }} enforced in the kernel) — expand the row to see which">
+            Partial {{ g.blocked_count }}/{{ g.total_cidrs }}
+          </span>
+          {% else %}
+          <span class="text-gray-300">–</span>
+          {% endif %}
+        </td>
+        <td class="px-4 py-3 whitespace-nowrap" onclick="event.stopPropagation()">
+          <div class="flex items-center gap-1.5">
+            {% if g.block_status != 'full' %}
+            <form hx-post="/api/block-group"
+                  hx-target="#network-groups-wrap"
+                  hx-swap="innerHTML">
+              <input type="hidden" name="network_name" value="{{ g.network_name }}" />
+              <input type="hidden" name="asn" value="{{ g.asn }}" />
+              <button type="submit"
+                class="px-2 py-1 text-xs font-medium bg-red-50 hover:bg-red-100 text-red-700 rounded transition-colors">
+                {% if g.block_status == 'partial' %}Block remaining{% else %}Block all CIDRs{% endif %}
+              </button>
+            </form>
+            {% endif %}
+            <form hx-post="/api/networks/rename"
+                  hx-prompt="New name for {{ g.network_name }}"
+                  hx-target="#network-groups-wrap"
+                  hx-swap="innerHTML">
+              <input type="hidden" name="network_name" value="{{ g.network_name }}" />
+              <input type="hidden" name="asn" value="{{ g.asn }}" />
+              <button type="submit" title="Edit network name"
+                class="px-2 py-1 text-xs font-medium bg-gray-50 hover:bg-gray-100 text-gray-700 rounded transition-colors">
+                Rename
+              </button>
+            </form>
+            <form hx-post="/api/networks/refresh-asn"
+                  hx-target="#network-groups-wrap"
+                  hx-swap="innerHTML"
+                  hx-confirm="Re-resolve ASN info for {{ g.network_name }}? This clears the cached ranges and queries RDAP again.">
+              <input type="hidden" name="network_name" value="{{ g.network_name }}" />
+              <input type="hidden" name="asn" value="{{ g.asn }}" />
+              <button type="submit" title="Refresh AS info via RDAP"
+                class="px-2 py-1 text-xs font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded transition-colors">
+                Refresh AS
+              </button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      <!-- Expandable live IPs for this group -->
+      <tr id="expand-{{ slug }}" class="hidden">
+        <td colspan="9" class="p-0 bg-indigo-50/30">
+          <div id="group-ips-{{ slug }}"
+               hx-get="/partials/group-live-ips?network_name={{ g.network_name | urlencode }}&asn={{ g.asn | urlencode }}"
+               hx-trigger="revealed"
+               hx-swap="innerHTML"
+               class="px-8 py-3">
+            <span class="text-sm text-gray-400 italic">Loading…</span>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-12 text-center text-gray-400">
+  <p class="font-medium text-gray-500">No ASN data yet</p>
+  <p class="mt-1 text-sm">Networks appear after RDAP enrichment runs (every 60 s after new IPs are seen).</p>
+</div>
+{% endif %}
+</div>

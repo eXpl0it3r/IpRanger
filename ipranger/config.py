@@ -2,8 +2,6 @@ import yaml
 import os
 import copy
 
-# Resolve config.yaml relative to the project root (parent of this package),
-# so it's found regardless of the working directory the app is started from.
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_PACKAGE_DIR)
 _DEFAULT_CONFIG_PATH = os.path.join(_PROJECT_ROOT, 'config.yaml')
@@ -25,23 +23,10 @@ DEFAULT_CONFIG = {
     },
     'monitoring': {
         'interval_seconds': 10,
-        'flag_threshold': 500,
     },
     'blocklists': {
         'update_interval_hours': 24,
         'sources': [
-            {
-                'name': 'firehol_level1',
-                'url': 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset',
-                'type': 'cidr',
-                'enabled': False,
-            },
-            {
-                'name': 'firehol_level2',
-                'url': 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level2.netset',
-                'type': 'cidr',
-                'enabled': False,
-            },
             {
                 'name': 'emerging_threats',
                 'url': 'https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt',
@@ -55,43 +40,23 @@ DEFAULT_CONFIG = {
                 'enabled': True,
             },
             {
-                'name': 'tor_exit_nodes',
-                'url': 'https://check.torproject.org/torbulkexitlist',
-                'type': 'ip',
-                'enabled': False,
-            },
-            {
                 'name': 'cinsscore',
                 'url': 'https://cinsscore.com/list/ci-badguys.txt',
                 'type': 'ip',
                 'enabled': True,
-            }
-
+            },
         ],
     },
     'rdap': {
-        'cache_ttl_hours': 168,
         'lookup_delay_seconds': 1,
     },
     'ipset': {
-        'set_name': 'ipranger_blocked',
-        'auto_block': False,
-        'auto_block_threshold': 1000,
         'persist': True,
-    },
-    'friendly': {
-        'ips': [],
-        'ranges': [],
-    },
-    'countries': {
-        'blocking_enabled': False,
-        'blocked_countries': [],
     },
 }
 
 
 def _deep_merge(base, override):
-    """Recursively merge override dict into base dict."""
     result = copy.deepcopy(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -116,12 +81,11 @@ class Config:
             with open(path, 'r') as f:
                 loaded = yaml.safe_load(f) or {}
             self._data = _deep_merge(self._data, loaded)
-        except Exception as e:
+        except Exception as exc:
             import logging
-            logging.warning(f"Failed to load config from {path}: {e}. Using defaults.")
+            logging.warning(f"Failed to load config from {path}: {exc}. Using defaults.")
 
     def get(self, *keys, default=None):
-        """Access nested config values by key path. E.g. config.get('server', 'port')."""
         node = self._data
         for key in keys:
             if not isinstance(node, dict) or key not in node:

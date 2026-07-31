@@ -1,42 +1,25 @@
-import requests
+"""Blocklist feed fetching and storage for IpRanger V2."""
 import logging
+import requests
 from ipaddress import ip_network, ip_address, AddressValueError
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {'User-Agent': 'IpRanger/1.0'}
+HEADERS = {'User-Agent': 'IpRanger/2.0'}
 
 
-def fetch_blocklist(url, entry_type):
-    """Fetch a block list URL. Returns list of (entry, entry_type) tuples."""
-    try:
-        resp = requests.get(url, timeout=30, headers=HEADERS)
-        resp.raise_for_status()
-        return parse_blocklist_content(resp.text, entry_type)
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch blocklist {url}: {e}")
-        return []
-
-
-def parse_blocklist_content(content, entry_type):
-    """Parse block list text content. Returns list of (entry, resolved_type) tuples."""
+def _parse_feed(content: str, entry_type: str) -> list:
+    """Parse a blocklist text file into a list of (entry, resolved_type) tuples."""
     entries = []
     for line in content.splitlines():
         line = line.strip()
-        if not line or line.startswith('#') or line.startswith(';') or line.startswith('//'):
+        if not line or line.startswith(('#', ';', '//')):
             continue
-        # Extract first token (handle inline comments)
-        token = line.split()[0]
-        # Strip any trailing semicolons or commas
-        token = token.rstrip(';,')
+        token = line.split()[0].rstrip(';,')
         try:
             if '/' in token:
                 net = ip_network(token, strict=False)
                 entries.append((str(net), 'cidr'))
-            elif token.upper().startswith('AS') and token[2:].isdigit():
-                entries.append((token.upper(), 'asn'))
-            elif token.isdigit():
-                entries.append((f"AS{token}", 'asn'))
             else:
                 ip_address(token)
                 entries.append((token, 'ip'))
@@ -45,54 +28,57 @@ def parse_blocklist_content(content, entry_type):
     return entries
 
 
-def _push_to_ipset(entries):
-    """Push IP/CIDR entries to ipset. Silently skips if ipset is unavailable."""
+def fetch_blocklist(url: str, entry_type: str) -> list:
     try:
-        from .ipset import bulk_add_to_ipset
-        added = bulk_add_to_ipset(entries)
-        logger.info(f"Pushed {added} entries to ipset")
-    except Exception as e:
-        logger.warning(f"Could not push entries to ipset: {e}")
+        resp = requests.get(url, timeout=30, headers=HEADERS)
+        resp.raise_for_status()
+        return _parse_feed(resp.text, entry_type)
+    except requests.RequestException as exc:
+        logger.error(f"Failed to fetch {url}: {exc}")
+        return []
 
 
-def refresh_all_blocklists():
-    """Fetch, store, and push to ipset all enabled block lists from config."""
+def refresh_all_blocklists() -> int:
+    """Fetch, store, and push to ipset all enabled blocklist sources."""
     from .config import config
-    from .db import upsert_blocklist_source, update_blocklist_entries
+    from .db import seed_blocklist_source, replace_blocklist_entries
+    from .ipset import bulk_add_to_blacklist, ensure_ipsets
 
     sources = config.get('blocklists', 'sources', default=[])
+    ensure_ipsets()
     updated = 0
-    for source in sources:
-        if not source.get('enabled', True):
+    for src in sources:
+        if not src.get('enabled', True):
+            seed_blocklist_source(src['name'], src['url'], src['type'], enabled=0)
             continue
-        name = source['name']
-        url = source['url']
-        entry_type = source['type']
-        upsert_blocklist_source(name, url, entry_type, enabled=1)
-        entries = fetch_blocklist(url, entry_type)
+        seed_blocklist_source(src['name'], src['url'], src['type'], enabled=1)
+        entries = fetch_blocklist(src['url'], src['type'])
         if entries:
-            update_blocklist_entries(name, entries)
-            _push_to_ipset(entries)
+            replace_blocklist_entries(src['name'], entries)
+            bulk_add_to_blacklist(entries)
             updated += 1
-            logger.info(f"Updated blocklist {name}: {len(entries)} entries")
+            logger.info(f"Updated {src['name']}: {len(entries)} entries")
         else:
-            logger.warning(f"Blocklist {name} returned no entries")
+            logger.warning(f"Blocklist {src['name']} returned no entries")
     return updated
 
 
-def refresh_blocklist_source(source_name):
-    """Refresh a single blocklist source by name. Returns entry count or 0."""
+def refresh_one_blocklist(name: str) -> int:
+    """Refresh a single blocklist source by name. Returns entry count."""
     from .config import config
-    from .db import update_blocklist_entries
+    from .db import replace_blocklist_entries
+    from .ipset import bulk_add_to_blacklist, ensure_ipsets
 
     sources = config.get('blocklists', 'sources', default=[])
-    for source in sources:
-        if source['name'] == source_name:
-            entries = fetch_blocklist(source['url'], source['type'])
-            if entries:
-                update_blocklist_entries(source['name'], entries)
-                _push_to_ipset(entries)
-                logger.info(f"Refreshed blocklist {source_name}: {len(entries)} entries")
-            return len(entries)
-    logger.warning(f"Blocklist source not found: {source_name}")
+    for src in sources:
+        if src['name'] != name:
+            continue
+        ensure_ipsets()
+        entries = fetch_blocklist(src['url'], src['type'])
+        if entries:
+            replace_blocklist_entries(name, entries)
+            bulk_add_to_blacklist(entries)
+            logger.info(f"Refreshed {name}: {len(entries)} entries")
+        return len(entries)
+    logger.warning(f"Blocklist source not found: {name}")
     return 0
